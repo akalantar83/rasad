@@ -277,8 +277,11 @@ class Supervisor:
         bus.publish({"type": "run", "id": run_id, "status": final})
         try:
             db.checkpoint()
-        except Exception:
-            pass
+            from . import notify, ops
+            notify.background(notify.dispatch_signals)
+            await asyncio.to_thread(ops.daily_maintenance)
+        except Exception as e:  # noqa: BLE001
+            print("post-run maintenance:", e)
         bus.publish({"type": "data_changed"})
         self.status = "killed" if self.killed else "idle"
         self.run_id = None
@@ -303,6 +306,11 @@ class Supervisor:
                 c.execute("UPDATE signals SET status=? WHERE status='pending'", (status,))
         if decision == "approve":
             bus.publish({"type": "toast", "level": "success", "msg": "بریف منتشر شد" if kind == "writer" else "هشدارهای بحرانی تأیید شد"})
+            from . import notify
+            if kind == "writer":
+                notify.background(notify.dispatch_brief, appr["brief_id"])
+            elif kind == "alerts":
+                notify.background(notify.dispatch_signals)
 
     async def rerun(self, agent, actor="user"):
         if agent not in REGISTRY or self.status != "idle" or self.killed:

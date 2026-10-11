@@ -112,6 +112,9 @@ def init():
             if col not in cols:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
         c.commit()
+    from . import auth, notify, watch  # noqa: E402  (module schemas)
+    for m in (auth, notify, watch):
+        m.init()
 
 
 def checkpoint():
@@ -166,6 +169,9 @@ def jload(s, default=None):
 
 
 def audit(actor, action, target="", detail=None):
+    if actor in ("user", None):
+        from .auth import actor as _actor
+        actor = _actor()
     with tx() as c:
         c.execute("INSERT INTO audit_log(ts,actor,action,target,detail) VALUES(?,?,?,?,?)",
                   (time.time(), actor, action, target, jdump(detail or {})))

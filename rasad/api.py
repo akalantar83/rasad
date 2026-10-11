@@ -4,17 +4,17 @@ import time
 from collections import Counter, defaultdict
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import ai, db, llm
+from . import ai, auth, db, llm, notify, ops, watch
 from . import supervisor as sup_mod
 from .config import settings
 from .supervisor import bus
 from .taxonomy import ENTITY, TOPICS
 from .text import normalize
 
-app = FastAPI(title="Rasad · رصد", version="0.2.0")
+app = FastAPI(title="Rasad · رصد", version="0.3.0")
 
 
 @app.on_event("startup")
@@ -27,8 +27,50 @@ async def _startup():
 
 
 def _auth(token):
-    if settings.admin_token and token != settings.admin_token:
-        raise HTTPException(401, "admin token required")
+    """Kept for backwards compatibility; access control is enforced by AuthMiddleware (RBAC)."""
+    return None
+
+
+class AuthMiddleware:
+    """Pure-ASGI RBAC middleware (keeps streaming responses intact and propagates the user via contextvars)."""
+
+    def __init__(self, app_):
+        self.app = app_
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        hdr = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+        user = None
+        if settings.admin_token and hdr.get("x-admin-token") == settings.admin_token:
+            user = auth.SYSTEM_ADMIN
+        else:
+            tok = None
+            if hdr.get("authorization", "").lower().startswith("bearer "):
+                tok = hdr["authorization"][7:].strip()
+            else:
+                for part in hdr.get("cookie", "").split(";"):
+                    k, _, v = part.strip().partition("=")
+                    if k == auth.COOKIE:
+                        tok = v
+            user = await asyncio.to_thread(auth.user_from_token, tok) if tok else None
+        if not auth.enabled():
+            user = user or auth.OPEN_USER
+        need = auth.required_role(scope["method"], scope["path"])
+        if not auth.allowed(user, need):
+            code, msg = (401, "ورود لازم است") if user is None else (403, "دسترسی این نقش کافی نیست")
+            body = json.dumps({"detail": msg, "need": need}, ensure_ascii=False).encode()
+            await send({"type": "http.response.start", "status": code, "headers": [(b"content-type", b"application/json; charset=utf-8")]})
+            await send({"type": "http.response.body", "body": body})
+            return
+        token = auth.current_user.set(user)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            auth.current_user.reset(token)
+
+
+app.add_middleware(AuthMiddleware)
 
 
 def H(hours):
@@ -568,6 +610,336 @@ async def events(request: Request):
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "db": str(settings.db_path), "state": sup_mod.get().status}
+
+
+# ---------------- auth & users ----------------
+def _client_ip(request: Request):
+    return (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "")).split(",")[0].strip()
+
+
+def _set_session(resp, tok):
+    resp.set_cookie(auth.COOKIE, tok, max_age=auth.SESSION_TTL, httponly=True, samesite="lax", secure=settings.cookie_secure, path="/")
+
+
+@app.get("/api/auth/status")
+def auth_status():
+    u = auth.current_user.get()
+    real = u if (u and u.get("id")) or not auth.enabled() or (u and u is auth.SYSTEM_ADMIN) else None
+    return {"auth_enabled": auth.enabled(), "setup_required": auth.enabled() and auth.user_count() == 0, "user": real,
+            "roles": auth.ROLES_FA}
+
+
+@app.post("/api/auth/setup")
+def auth_setup(request: Request, body: dict = Body(...)):
+    if auth.user_count() > 0:
+        raise HTTPException(409, "راه‌اندازی اولیه قبلاً انجام شده است")
+    try:
+        auth.create_user(body.get("username"), body.get("password"), "admin", body.get("name"))
+        tok, u = auth.login(body.get("username"), body.get("password"), request.headers.get("user-agent", ""), _client_ip(request))
+    except (ValueError, PermissionError) as e:
+        raise HTTPException(400, str(e))
+    db.audit(u["username"], "auth:setup", u["username"])
+    resp = JSONResponse({"user": u})
+    _set_session(resp, tok)
+    return resp
+
+
+@app.post("/api/auth/login")
+def auth_login(request: Request, body: dict = Body(...)):
+    try:
+        tok, u = auth.login(body.get("username"), body.get("password"), request.headers.get("user-agent", ""), _client_ip(request))
+    except PermissionError as e:
+        raise HTTPException(401, str(e))
+    db.audit(u["username"], "auth:login", _client_ip(request))
+    resp = JSONResponse({"user": u, "token": tok if body.get("want_token") else None})
+    _set_session(resp, tok)
+    return resp
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request):
+    auth.logout(request.cookies.get(auth.COOKIE))
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(auth.COOKIE, path="/")
+    return resp
+
+
+@app.post("/api/auth/password")
+def auth_password(request: Request, body: dict = Body(...)):
+    u = auth.user_from_token(request.cookies.get(auth.COOKIE))
+    if not u:
+        raise HTTPException(401, "ورود لازم است")
+    row = db.q1("SELECT pw_hash FROM users WHERE id=?", (u["id"],))
+    if not auth.verify_pw(body.get("old") or "", row["pw_hash"]):
+        raise HTTPException(400, "رمز فعلی نادرست است")
+    try:
+        auth.update_user(u["id"], {"password": body.get("new")})
+        tok, _ = auth.login(u["username"], body.get("new"), request.headers.get("user-agent", ""), _client_ip(request))
+    except (ValueError, PermissionError) as e:
+        raise HTTPException(400, str(e))
+    db.audit(u["username"], "auth:password", u["username"])
+    resp = JSONResponse({"ok": True})
+    _set_session(resp, tok)
+    return resp
+
+
+@app.get("/api/users")
+def users_list():
+    return [auth.public(u) for u in db.q("SELECT * FROM users ORDER BY CASE role WHEN 'admin' THEN 0 WHEN 'analyst' THEN 1 ELSE 2 END, username")]
+
+
+@app.post("/api/users")
+def users_create(body: dict = Body(...)):
+    try:
+        uid = auth.create_user(body.get("username"), body.get("password"), body.get("role", "viewer"), body.get("name"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    db.audit("user", "user:create", body.get("username"), {"role": body.get("role")})
+    return auth.public(db.q1("SELECT * FROM users WHERE id=?", (uid,)))
+
+
+@app.post("/api/users/{uid}")
+def users_update(uid: int, body: dict = Body(...)):
+    try:
+        u = auth.update_user(uid, body)
+    except KeyError:
+        raise HTTPException(404)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    db.audit("user", "user:update", u["username"], {k: v for k, v in body.items() if k != "password"} | ({"password": "***"} if body.get("password") else {}))
+    return u
+
+
+@app.delete("/api/users/{uid}")
+def users_delete(uid: int):
+    me = auth.current_user.get()
+    if me and me.get("id") == uid:
+        raise HTTPException(400, "حذف حساب خودتان مجاز نیست")
+    try:
+        auth.delete_user(uid)
+    except KeyError:
+        raise HTTPException(404)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    db.audit("user", "user:delete", str(uid))
+    return {"ok": True}
+
+
+# ---------------- sources management ----------------
+@app.post("/api/sources/validate")
+async def sources_validate(body: dict = Body(...)):
+    return await asyncio.to_thread(ops.validate_feed, body.get("url", ""), body.get("kind", "rss"), body.get("query"))
+
+
+@app.get("/api/sources/export.opml")
+def sources_opml():
+    return Response(ops.opml_export(), media_type="text/x-opml; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="rasad-sources.opml"'})
+
+
+@app.post("/api/sources/import")
+async def sources_import(body: dict = Body(...)):
+    try:
+        r = await asyncio.to_thread(ops.opml_import, body.get("opml", ""), body.get("lang"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    db.audit("user", "source:import", "", {"added": len(r["added"]), "skipped": r["skipped"]})
+    return r
+
+
+@app.post("/api/sources")
+async def sources_create(body: dict = Body(...)):
+    try:
+        r = await asyncio.to_thread(ops.save_source, body, None, body.get("check", True))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    db.audit("user", "source:create", r["id"], {"url": body.get("url"), "status": r["source"]["status"]})
+    bus.publish({"type": "data_changed"})
+    return r
+
+
+@app.post("/api/sources/{sid}")
+async def sources_edit(sid: str, body: dict = Body(...)):
+    try:
+        r = await asyncio.to_thread(ops.save_source, body, sid, False)
+    except KeyError:
+        raise HTTPException(404)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    db.audit("user", "source:edit", sid, {k: v for k, v in body.items()})
+    return r
+
+
+@app.delete("/api/sources/{sid}")
+def sources_delete(sid: str):
+    r = ops.delete_source(sid)
+    db.audit("user", "source:delete", sid, r)
+    return r
+
+
+# ---------------- notifications ----------------
+@app.get("/api/notify/channels")
+def notify_channels():
+    return {"channels": notify.list_channels(), "types": notify.TYPES, "severities": notify.SEV_FA}
+
+
+@app.post("/api/notify/channels")
+def notify_create(body: dict = Body(...)):
+    try:
+        ch = notify.save_channel(body)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    db.audit("user", "notify:create", str(ch["id"]), {"type": ch["type"], "name": ch["name"]})
+    return ch
+
+
+@app.post("/api/notify/channels/{cid}")
+def notify_update(cid: int, body: dict = Body(...)):
+    try:
+        ch = notify.save_channel(body, cid)
+    except KeyError:
+        raise HTTPException(404)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    db.audit("user", "notify:update", str(cid), {"name": ch["name"], "enabled": ch["enabled"]})
+    return ch
+
+
+@app.delete("/api/notify/channels/{cid}")
+def notify_delete(cid: int):
+    notify.delete_channel(cid)
+    db.audit("user", "notify:delete", str(cid))
+    return {"ok": True}
+
+
+@app.post("/api/notify/channels/{cid}/test")
+async def notify_test(cid: int):
+    try:
+        return await asyncio.to_thread(notify.test_channel, cid)
+    except KeyError:
+        raise HTTPException(404)
+
+
+@app.get("/api/notify/deliveries")
+def notify_deliveries(limit: int = 100):
+    return notify.deliveries(limit)
+
+
+# ---------------- watchlists ----------------
+@app.get("/api/watchlists")
+def watch_list():
+    out = watch.list_all()
+    since = H(24)
+    for w in out:
+        w["hits_24h"] = len(watch.hits(w, since, limit=500))
+    return out
+
+
+@app.post("/api/watchlists")
+def watch_create(body: dict = Body(...)):
+    try:
+        w = watch.save(body, owner=auth.actor())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    db.audit("user", "watch:create", str(w["id"]), {"name": w["name"]})
+    return w
+
+
+@app.post("/api/watchlists/{wid}")
+def watch_update(wid: int, body: dict = Body(...)):
+    try:
+        w = watch.save(body, wid)
+    except KeyError:
+        raise HTTPException(404)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    db.audit("user", "watch:update", str(wid), {"name": w["name"]})
+    return w
+
+
+@app.delete("/api/watchlists/{wid}")
+def watch_delete(wid: int):
+    watch.delete(wid)
+    db.audit("user", "watch:delete", str(wid))
+    return {"ok": True}
+
+
+@app.get("/api/watchlists/{wid}/hits")
+def watch_hits(wid: int, hours: int = 48, limit: int = 100):
+    w = db.q1("SELECT * FROM watchlists WHERE id=?", (wid,))
+    if not w:
+        raise HTTPException(404)
+    return watch.hits(w, H(hours), limit)
+
+
+# ---------------- system / ops ----------------
+@app.get("/api/system/info")
+def system_info():
+    return ops.info()
+
+
+@app.post("/api/system/backup")
+async def system_backup():
+    r = await asyncio.to_thread(ops.backup, "manual")
+    db.audit("user", "system:backup", r["file"])
+    return r
+
+
+@app.get("/api/system/backups")
+def system_backups():
+    return ops.list_backups()
+
+
+@app.get("/api/system/backups/{name}")
+def system_backup_download(name: str):
+    try:
+        p = ops.backup_path(name)
+    except (ValueError, FileNotFoundError):
+        raise HTTPException(404)
+    return FileResponse(p, filename=name, media_type="application/octet-stream")
+
+
+@app.post("/api/system/retention")
+def system_retention(body: dict = Body(...)):
+    d = int(body.get("days") or 0)
+    if not 3 <= d <= 3650:
+        raise HTTPException(400, "بازه نگهداری باید بین ۳ تا ۳۶۵۰ روز باشد")
+    db.kv_set("retention_days", d)
+    db.audit("user", "system:retention", str(d))
+    return {"retention_days": d}
+
+
+@app.post("/api/system/purge")
+async def system_purge(body: dict = Body(default={})):
+    r = await asyncio.to_thread(ops.purge, int(body.get("days") or 0) or None)
+    db.audit("user", "system:purge", "", r)
+    bus.publish({"type": "data_changed"})
+    return r
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def prom_metrics():
+    return PlainTextResponse(ops.metrics(sup_mod.get()), media_type="text/plain; version=0.0.4")
+
+
+# ---------------- exports ----------------
+def _csv_resp(text, name):
+    return Response(text, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.get("/api/export/stories.csv")
+def export_stories(hours: int = 168):
+    return _csv_resp(ops.stories_csv(hours), "rasad-stories.csv")
+
+
+@app.get("/api/export/articles.csv")
+def export_articles(hours: int = 48):
+    return _csv_resp(ops.articles_csv(hours), "rasad-articles.csv")
+
+
+@app.get("/api/graph/export.gexf")
+def export_gexf(hours: int = 72, min_weight: int = 2):
+    return Response(ops.gexf(graph(hours=hours, min_weight=min_weight, limit=2000)), media_type="application/gexf+xml",
+                    headers={"Content-Disposition": 'attachment; filename="rasad-graph.gexf"'})
 
 
 app.mount("/static", StaticFiles(directory=str(settings.web_dir)), name="static")

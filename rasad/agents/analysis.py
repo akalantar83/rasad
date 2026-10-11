@@ -133,10 +133,15 @@ class PatternAnomaly(Agent):
                              "score": float(len(arts)), "baseline": 1.0, "observed": float(len(arts)), "window": "story",
                              "severity": "critical" if s["urgency"] == "flash" or (s["category"] == "conflict" and len(arts) >= 6) else "warning",
                              "story_ids": [s["id"]]})
+        try:
+            from .. import watch
+            sigs += watch.match(now)
+        except Exception as e:  # noqa: BLE001
+            ctx.log(f"watchlists: {e}", "warn")
         new = 0
         with db.tx() as c:
             for g in sigs:
-                expl = {"text": g["label"], "kind": "inference", "confidence": "medium" if g["severity"] == "warning" else "high",
+                expl = {"text": g.get("explain") or g["label"], "kind": "inference", "confidence": "medium" if g["severity"] == "warning" else "high",
                         "alternatives": ["افزایش تعداد منابع یا تغییر زمان‌بندی فیدها", "پوشش رسانه‌ای یک رویداد واحد در چند بخش خبری"]}
                 cur = c.execute("""INSERT OR IGNORE INTO signals(type,key,label,score,baseline,observed,window,severity,story_ids,explanation,status,created)
                                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
