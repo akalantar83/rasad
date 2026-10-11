@@ -120,3 +120,13 @@ def test_watchlist_match_and_sources_opml_backup_metrics():
         assert "<gexf" in c.get("/api/graph/export.gexf").text
         assert c.post("/api/system/retention", json={"days": 1}).status_code == 400
         assert c.get("/api/system/info").json()["version"] == "0.3.0"
+
+
+def test_frontend_assets_served():
+    with TestClient(app) as c:
+        html = c.get("/").text
+        for lib in ("sigma.min.js", "graphology.umd.min.js", "graphology-library.min.js"):
+            assert lib in html
+            assert c.get(f"/static/vendor/{lib}").status_code == 200
+        for js in ("graph.js", "admin.js", "auth.js", "core.js", "app.js"):
+            assert c.get(f"/static/js/{js}").status_code == 200

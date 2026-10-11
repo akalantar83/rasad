@@ -125,63 +125,7 @@ export async function renderMap({ view, side, params }) {
 }
 
 // ============ 3) Knowledge Graph ============
-export async function renderGraph({ view, side, params }) {
-  let focus = params[0] || null, hours = 72;
-  view.style.padding = 0;
-  view.innerHTML = `<div id="gStage" style="position:absolute;inset:0"></div>
-  <div class="float" style="top:10px;right:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-    <select id="gHours"><option value="24">۲۴ ساعت</option><option value="72" selected>۷۲ ساعت</option><option value="168">۷ روز</option></select>
-    <button class="btn" id="gAll">نمای کامل</button><span class="small muted">مسیر:</span><select id="pA"></select><span>↔</span><select id="pB"></select><button class="btn" id="pGo">یافتن مسیر</button>
-  </div>`;
-  const TYPE = { GPE: ["کشور", "#5E9FE8"], ORG: ["سازمان", "#A98BE0"], LOC: ["مکان/تنگه", "#4FB9C9"], PORT: ["بندر", "#72BC8F"], PERSON: ["شخص", "#E07FA2"], EVENT: ["رویداد", "#E97366"], PRODUCT: ["کالا/سامانه", "#E0A84E"] };
-  const ch = makeChart($("#gStage"));
-  let data;
-  async function draw(pathIds = []) {
-    data = await api(`/api/graph?hours=${hours}&min_weight=${focus ? 1 : 2}${focus ? "&focus=" + focus : ""}`);
-    const max = Math.max(1, ...data.nodes.map((n) => n.mentions));
-    const opts = data.nodes.slice().sort((a, b) => b.mentions - a.mentions).map((n) => `<option value="${n.id}">${esc(n.name_fa)}</option>`).join("");
-    $("#pA").innerHTML = opts; $("#pB").innerHTML = opts; if (data.nodes[1]) $("#pB").selectedIndex = 1;
-    const onPath = new Set(pathIds);
-    const pairs = new Set(pathIds.slice(1).map((x, i) => [pathIds[i], x].sort().join("|")));
-    ch.setOption({ tooltip: { ...baseTooltip(), formatter: (p) => p.dataType === "edge" ? (p.data.predicate && p.data.predicate !== "co_mentioned" ? `${esc(p.data.sName)} <b>${esc(p.data.predicate_fa)}</b> ${esc(p.data.tName)} · ✦ استخراج مدل` : `${p.data.sName} ↔ ${p.data.tName}: ${fa(p.data.weight)} هم‌آیی`) : `${p.data.name} · ${fa(p.data.mentions)} اشاره` },
-      legend: [{ data: Object.values(TYPE).map((t) => t[0]), bottom: 10, textStyle: { color: T().muted, fontFamily: "Vazirmatn" } }],
-      series: [{ type: "graph", layout: "force", roam: true, draggable: true, animation: !reducedMotion(),
-        categories: Object.values(TYPE).map(([n, c]) => ({ name: n, itemStyle: { color: c } })),
-        force: { repulsion: 220, edgeLength: [40, 160], gravity: 0.06, friction: 0.15 },
-        label: { show: true, position: "right", color: T().text, fontFamily: "Vazirmatn", fontSize: 11 },
-        emphasis: { focus: "adjacency", lineStyle: { width: 3 } },
-        lineStyle: { color: "source", opacity: 0.35, curveness: 0.08 },
-        data: data.nodes.map((n) => ({ id: n.id, name: n.name_fa, mentions: n.mentions, category: Object.keys(TYPE).indexOf(n.type) < 0 ? 0 : Object.keys(TYPE).indexOf(n.type),
-          symbolSize: 8 + 38 * Math.sqrt(n.mentions / max), itemStyle: onPath.has(n.id) || n.id === focus ? { borderColor: "#E0A84E", borderWidth: 3 } : undefined })),
-        links: data.links.map((l) => ({ source: l.source, target: l.target, weight: l.weight, evidence: l.evidence, predicate: l.predicate, predicate_fa: l.predicate_fa,
-          symbol: l.predicate && l.predicate !== "co_mentioned" ? ["none", "arrow"] : ["none", "none"], symbolSize: 8,
-          label: l.predicate && l.predicate !== "co_mentioned" ? { show: true, formatter: l.predicate_fa, fontSize: 9, color: "#E0A84E", fontFamily: "Vazirmatn" } : undefined,
-          sName: data.nodes.find((n) => n.id === l.source)?.name_fa, tName: data.nodes.find((n) => n.id === l.target)?.name_fa,
-          lineStyle: pairs.has([l.source, l.target].sort().join("|")) ? { color: "#E0A84E", width: 4, opacity: 1 } : l.predicate && l.predicate !== "co_mentioned" ? { color: "#E0A84E", width: 1.6, opacity: 0.8, type: "dashed" } : { width: Math.min(6, 0.6 + l.weight / 3) } })) }] }, true);
-    if (focus) showNode(focus);
-    else side.innerHTML = `<h2>گراف دانش</h2><p class="muted small">${fa(data.nodes.length)} موجودیت و ${fa(data.links.length)} رابطه. روی گره کلیک کنید تا جزئیات، و دوبار کلیک کنید تا همسایه‌ها گسترش یابند. ابزار مسیر کوتاه‌ترین زنجیره ارتباط دو بازیگر را پیدا می‌کند.</p><p class="small dim">دو نوع لبه: هم‌آیی در یک خبر (خط پیوسته، با شاهد) و رابطه نوع‌دار صریح که عامل «استخراج موجودیت و رابطه» با مدل زبانی و نقل‌قول شاهد استخراج کرده است (خط‌چین کهربایی با برچسب؛ مثلاً «تحریم می‌کند»، «مذاکره می‌کند با»). گره‌های شخص و رویداد نیز از همین مسیر کشف می‌شوند.</p>`;
-  }
-  async function showNode(id) {
-    const n = data.nodes.find((x) => x.id === id) || { id, name_fa: id };
-    const ss = await api(`/api/stories?entity=${encodeURIComponent(id)}&hours=${hours}&limit=20`);
-    const nb = data.links.filter((l) => l.source === id || l.target === id).sort((a, b) => b.weight - a.weight).slice(0, 12);
-    side.innerHTML = `<h2>${esc(n.name_fa)} <span class="small dim">${esc(n.name_en || "")}</span></h2><div class="small muted">${fa(n.mentions)} اشاره در ${fa(hours)} ساعت</div>
-     <div class="toolbar" style="margin-top:8px"><button class="btn" id="gFocus">گسترش همسایه‌ها</button></div>
-     <div class="h-sec">قوی‌ترین روابط</div>${nb.map((l) => { const o = l.source === id ? l.target : l.source; const on_ = data.nodes.find((x) => x.id === o); return `<div class="row" data-n="${o}"><div style="flex:1">${l.predicate && l.predicate !== "co_mentioned" ? `<span class="small" style="color:var(--c-amber)">${esc(l.predicate_fa)}</span> ` : ""}${esc(on_?.name_fa || o)}</div><span class="num small">${fa(l.weight)}</span></div>`; }).join("")}
-     <div class="h-sec">داستان‌ها</div><div class="list" id="gStories">${ss.map((s) => storyRow(s)).join("") || '<div class="empty">—</div>'}</div>`;
-    $("#gFocus").onclick = () => { focus = id; draw(); };
-    side.querySelectorAll("[data-n]").forEach((r) => (r.onclick = () => showNode(r.dataset.n)));
-    $("#gStories").onclick = (e) => { const r = e.target.closest("[data-sid]"); if (r) location.hash = "#/stories/" + r.dataset.sid; };
-  }
-  ch.on("click", (p) => { if (p.dataType === "node") showNode(p.data.id); else if (p.dataType === "edge") { const typed = p.data.predicate && p.data.predicate !== "co_mentioned"; const quotes = (p.data.evidence || []).filter((x) => typeof x === "object"); side.innerHTML = `<h2>${esc(p.data.sName)} ${typed ? `<span style="color:var(--c-amber)">${esc(p.data.predicate_fa)}</span>` : "↔"} ${esc(p.data.tName)}</h2><div class="muted small">${typed ? "✦ رابطه صریح استخراج‌شده با مدل زبانی" : fa(p.data.weight) + " خبر مشترک"} · شواهد اخیر:</div>${quotes.map((q) => `<blockquote class="small" style="border-inline-start:3px solid var(--c-amber);margin:8px 0;padding:4px 10px">«${esc(q.quote)}» <a href="#/stories/${q.story_id}">داستان ←</a></blockquote>`).join("")}<div id="ev"></div>`; loadEvidence((p.data.evidence || []).filter((x) => typeof x === "string")); } });
-  ch.on("dblclick", (p) => { if (p.dataType === "node") { focus = p.data.id; draw(); } });
-  async function loadEvidence(ids) { const arts = await Promise.all(ids.map((i) => api("/api/articles/" + i).catch(() => null))); $("#ev").innerHTML = arts.filter(Boolean).map((a) => `<div class="row" onclick="location.hash='#/stories/${a.story_id}'"><div><div class="t">${esc(a.title)}</div><div class="m">${esc(a.source_name)} · ${hhmm(a.published_at)}</div></div></div>`).join(""); }
-  $("#gHours").onchange = (e) => { hours = +e.target.value; draw(); };
-  $("#gAll").onclick = () => { focus = null; draw(); };
-  $("#pGo").onclick = async () => { const r = await api(`/api/path?a=${$("#pA").value}&b=${$("#pB").value}`); if (!r.path.length) return toast("مسیری یافت نشد", "warn"); const ids = r.path.map((x) => x.id); toast("مسیر: " + r.path.map((x) => x.name_fa).join(" ← "), "info"); focus = null; await draw(ids); };
-  await draw();
-  return () => { view.style.padding = ""; };
-}
+// (knowledge graph moved to graph.js — sigma.js/WebGL)
 
 // ============ 4) Stories & Timeline ============
 export async function renderStories({ view, side, params }) {

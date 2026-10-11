@@ -2,25 +2,30 @@ import { $, $$, esc, fa, ago, hhmm, api, post, on, store, connectEvents, toast, 
 import * as V from "./views.js";
 import { renderPipeline } from "./pipeline.js";
 import { renderAsk, renderSettings } from "./ai.js";
+import { renderGraph } from "./graph.js";
+import { renderAdmin, renderWatch } from "./admin.js";
+import { authStatus, showLogin, renderUserMenu, applyRole } from "./auth.js";
+import { can } from "./core.js";
 
 const I = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
 const ROUTES = [
   { id: "command", fa: "اتاق فرمان", icon: I('<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>'), render: V.renderCommand },
   { id: "map", fa: "کره و نقشه رویدادها", icon: I('<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>'), render: V.renderMap, noDrawer: true },
-  { id: "graph", fa: "گراف دانش", icon: I('<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="7" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7l7.5.5M7.5 8l3.5 8M16.8 9.2 13.3 16"/>'), render: V.renderGraph, noDrawer: true },
+  { id: "graph", fa: "گراف دانش", icon: I('<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="7" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7l7.5.5M7.5 8l3.5 8M16.8 9.2 13.3 16"/>'), render: renderGraph, noDrawer: true },
   { id: "stories", fa: "خط زمانی و داستان‌ها", icon: I('<path d="M4 6h16M4 12h10M4 18h13"/><circle cx="19" cy="12" r="1.5"/>'), render: V.renderStories },
   { id: "trends", fa: "رودخانه موضوعی و روندها", icon: I('<path d="M3 17c3-6 5 2 9-4s6-2 9-6"/><path d="M3 21c3-4 6 0 9-3s6-1 9-4"/>'), render: V.renderTrends },
   { id: "sources", fa: "مقایسه پوشش منابع", icon: I('<path d="M4 5h16v4H4zM4 11h10v4H4zM4 17h13v3H4z"/>'), render: V.renderSources },
   { id: "pipeline", fa: "خط لوله عامل‌ها", icon: I('<rect x="2.5" y="9" width="5" height="6" rx="1.5"/><rect x="9.5" y="4" width="5" height="6" rx="1.5"/><rect x="9.5" y="14" width="5" height="6" rx="1.5"/><rect x="16.5" y="9" width="5" height="6" rx="1.5"/><path d="M7.5 12h2M14.5 7l2 3M14.5 17l2-3"/>'), render: renderPipeline },
   { id: "ask", fa: "دستیار تحلیلی (پرسش از رصد)", icon: I('<path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8z"/><path d="M18.5 15l.8 1.9 1.9.8-1.9.8-.8 1.9-.8-1.9-1.9-.8 1.9-.8z"/>'), render: renderAsk, noDrawer: true },
+  { id: "watch", fa: "فهرست‌های پایش", icon: I('<path d="M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/>'), render: renderWatch, noDrawer: true },
   { id: "briefs", fa: "بریف و گزارش", icon: I('<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 12h7M9 16h7"/>'), render: V.renderBriefs },
 ];
 
 function buildRail() {
   $("#rail").innerHTML = ROUTES.filter((r) => !r.hidden).map((r) => `<a href="#/${r.id}" data-r="${r.id}">${r.icon}<span class="tip">${r.fa}</span></a>`).join("") +
-    `<div class="sep"></div><a href="#/qa" data-r="qa">${I('<path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/><path d="m8.5 12 2.5 2.5 4.5-5"/>')}<span class="tip">ارزیابی کیفیت و ممیزی</span></a><a href="#/settings" data-r="settings">${I('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>')}<span class="tip">تنظیمات و مصرف هوش مصنوعی</span></a>`;
+    `<div class="sep"></div>${can("admin") ? `<a href="#/admin" data-r="admin">${I('<circle cx="9" cy="8" r="3.2"/><path d="M3 20c.6-3.4 3-5.5 6-5.5s5.4 2.1 6 5.5"/><path d="M16.5 8.5h5M19 6v5"/>')}<span class="tip">مدیریت سامانه</span></a>` : ""}<a href="#/qa" data-r="qa">${I('<path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/><path d="m8.5 12 2.5 2.5 4.5-5"/>')}<span class="tip">ارزیابی کیفیت و ممیزی</span></a><a href="#/settings" data-r="settings">${I('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>')}<span class="tip">تنظیمات و مصرف هوش مصنوعی</span></a>`;
 }
-ROUTES.push({ id: "qa", fa: "کیفیت و ممیزی", render: V.renderQA, hidden: true }, { id: "settings", fa: "تنظیمات هوش مصنوعی", render: renderSettings, hidden: true, noDrawer: true });
+ROUTES.push({ id: "admin", fa: "مدیریت سامانه", render: renderAdmin, hidden: true, noDrawer: true }, { id: "qa", fa: "کیفیت و ممیزی", render: V.renderQA, hidden: true }, { id: "settings", fa: "تنظیمات هوش مصنوعی", render: renderSettings, hidden: true, noDrawer: true });
 
 let current = null, cleanup = null;
 async function route() {
@@ -32,7 +37,8 @@ async function route() {
   $$("#rail a").forEach((a) => a.classList.toggle("on", a.dataset.r === r.id));
   $("#main").classList.toggle("no-drawer", !!r.noDrawer);
   $("#body").classList.remove("no-panel");
-  $("#view").innerHTML = '<div class="empty">در حال بارگذاری…</div>';
+  $("#view").innerHTML = '<div class="view-skel"><div class="skel h"></div><div class="skel-row"><div class="skel b"></div><div class="skel b"></div><div class="skel b"></div></div><div class="skel t"></div></div>';
+  $("#view").classList.remove("enter"); void $("#view").offsetWidth; $("#view").classList.add("enter");
   $("#side").innerHTML = "";
   try { cleanup = (await r.render({ view: $("#view"), side: $("#side"), params: rest.map(decodeURIComponent), body: $("#body") })) || null; }
   catch (e) { console.error(e); $("#view").innerHTML = `<div class="empty">خطا در بارگذاری نما: ${esc(e.message)}</div>`; }
@@ -175,9 +181,16 @@ on("step", (ev) => { if (ev.status === "failed") logBuf.push({ ts: ev.ts, level:
 on("data_changed", () => { renderDrawer(); if (current && ["command", "stories", "trends", "sources", "briefs", "qa"].includes(current.id)) route(); });
 on("conn", (ev) => { if (!ev.ok) $("#runPill").innerHTML = '<span class="dot failed"></span><span>اتصال قطع است؛ تلاش مجدد…</span>'; });
 
+let authShown = false;
+on("auth_required", () => { if (authShown) return; authShown = true; showLogin(false, "نشست شما پایان یافته است؛ لطفاً دوباره وارد شوید."); });
+
 (async function boot() {
   document.documentElement.dataset.theme = localStorage.getItem("rasad_theme") || "dark";
-  buildRail();
+  let st;
+  try { st = await authStatus(); } catch (e) { $("#view").innerHTML = `<div class="empty">اتصال به سرور برقرار نشد: ${esc(e.message)}</div>`; return; }
+  if (st.setup_required) { authShown = true; return showLogin(true); }
+  if (st.auth_enabled && !st.user) { authShown = true; return showLogin(false); }
+  applyRole(); renderUserMenu(); buildRail();
   const meta = await api("/api/meta");
   store.meta = meta; store.topics = meta.topics; store.state = meta.state;
   renderState(meta.state);

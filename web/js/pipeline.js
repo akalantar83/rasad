@@ -1,5 +1,5 @@
 // Pipeline view: live agent graph, controls, approvals, step inspector, run replay
-import { $, $$, esc, fa, ago, dt, hhmm, api, post, on, store, toast, STATUS_FA, MODE_FA, reducedMotion } from "./core.js";
+import { $, $$, esc, fa, ago, dt, hhmm, api, post, on, store, toast, STATUS_FA, MODE_FA, reducedMotion, can } from "./core.js";
 
 const LAYERS = [
   { fa: "گردآوری", agents: ["scout", "ingestion", "extractor"] },
@@ -107,12 +107,13 @@ export async function renderPipeline({ view, side, params }) {
   // ---------- controls ----------
   function renderControls() {
     const st = store.state || {}, busy = ["running", "awaiting", "paused"].includes(st.status);
-    $("#pc", view).innerHTML = `
+    $("#pc", view).innerHTML = `<span data-need="admin" style="display:contents">
       <button class="btn primary" data-c="start" ${busy || st.killed ? "disabled" : ""}>▶ اجرای چرخه</button>
       ${st.status === "paused" ? `<button class="btn" data-c="resume">⏵ ادامه</button>` : `<button class="btn" data-c="pause" ${st.status !== "running" ? "disabled" : ""}>⏸ مکث</button>`}
       <button class="btn" data-c="takeover" ${st.mode === "manual" ? "disabled" : ""} title="بازگشت کنترل به انسان؛ حالت دستی">✋ تحویل کنترل</button>
       ${st.killed ? `<button class="btn danger solid" data-c="arm">⟲ فعال‌سازی</button>` : `<button class="btn danger" data-c="kill">⏻ توقف اضطراری</button>`}
-      <span class="seg" id="intSeg" title="فاصله اجرای زمان‌بند">${[300, 600, 1800, 3600].map((s) => `<button data-s="${s}" class="${st.interval == s ? "on" : ""}">${fa(s / 60)} د</button>`).join("")}</span>`;
+      <span class="seg" id="intSeg" title="فاصله اجرای زمان‌بند">${[300, 600, 1800, 3600].map((s) => `<button data-s="${s}" class="${st.interval == s ? "on" : ""}">${fa(s / 60)} د</button>`).join("")}</span></span><span class="small dim" data-viewer-note>کنترل اجرا فقط برای نقش «مدیر» فعال است.</span>`;
+    const nt = $("[data-viewer-note]", view); if (nt) nt.style.display = can("admin") ? "none" : "";
   }
   $("#pc", view).addEventListener("click", async (e) => {
     const b = e.target.closest("button"); if (!b || b.disabled) return;
@@ -145,7 +146,7 @@ export async function renderPipeline({ view, side, params }) {
         h += `<div class="h-sec">خروجی ساخت‌یافته</div><pre class="json">${esc(JSON.stringify(s.output ?? null, null, 2)?.slice(0, 6000))}</pre>`;
       } else h += `<p class="muted small">این عامل در اجرای انتخاب‌شده اجرا نشده است.</p>`;
       const busy = ["running", "awaiting", "paused"].includes(st.status);
-      h += `<div style="display:flex;gap:6px;margin-top:10px"><button class="btn" id="rerunBtn" ${busy || st.killed ? "disabled" : ""}>↻ اجرای مجدد فقط این عامل</button></div>`;
+      h += `<div style="display:flex;gap:6px;margin-top:10px"><button class="btn" data-need="admin" id="rerunBtn" ${busy || st.killed ? "disabled" : ""}>↻ اجرای مجدد فقط این عامل</button></div>`;
     } else if (!st.pending) {
       h += `<h2>خط لوله عامل‌ها</h2><p class="muted small" style="line-height:1.8">۱۳ عامل تخصصی زیر نظر ناظر. روی هر گره کلیک کنید تا ورودی، خروجی، استدلال و خطاها را ببینید. سطح اجرا: <b>${MODE_FA[st.mode] || ""}</b>. دروازه‌های تأیید: ${(st.gates || []).map((x) => x === "writer" ? "انتشار بریف" : "هشدار بحرانی").join("، ") || "—"}.</p>`;
     }
@@ -168,7 +169,7 @@ export async function renderPipeline({ view, side, params }) {
       try { const sg = await api("/api/signals"); const items = sg.filter((x) => x.status === "pending").slice(0, 20); body = `<div class="h-sec">هشدارهای در انتظار</div>${(items || []).map((s) => `<div class="small" style="padding:4px 0;border-bottom:1px solid var(--line)"><span class="tag ${s.severity}">${esc(s.severity)}</span> ${esc(s.label || s.type)}</div>`).join("") || '<p class="small muted">—</p>'}`; } catch {}
     } else body = `<p class="small muted">حالت دستی: پیش از اجرای این مرحله تأیید شما لازم است.</p>`;
     return `<div class="approval"><div style="font-weight:700;margin-bottom:6px">⛨ منتظر تأیید: ${esc(t.title_fa)} <span class="small muted">(${p.phase === "pre" ? "پیش از اجرا" : "پس از اجرا"})</span></div>${body}
-      <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap"><button class="btn primary" data-d="approve">✓ تأیید${p.kind === "writer" ? " و انتشار" : ""}</button><button class="btn danger" data-d="reject">✕ رد</button><button class="btn" data-d="skip">⤼ رد شدن از مرحله</button></div></div>`;
+      <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap" data-need="analyst"><button class="btn primary" data-d="approve">✓ تأیید${p.kind === "writer" ? " و انتشار" : ""}</button><button class="btn danger" data-d="reject">✕ رد</button><button class="btn" data-d="skip">⤼ رد شدن از مرحله</button></div></div>`;
   }
   function bindApproval() {
     $$("[data-d]", side).forEach((b) => b.addEventListener("click", async () => {
