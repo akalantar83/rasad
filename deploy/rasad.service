@@ -1,0 +1,18 @@
+# sudo cp deploy/rasad.service /etc/systemd/system/ && sudo systemctl enable --now rasad
+[Unit]
+Description=Rasad multi-agent news monitoring
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=rasad
+WorkingDirectory=/opt/rasad
+EnvironmentFile=-/opt/rasad/.env
+ExecStart=/opt/rasad/.venv/bin/python -m rasad serve --host 127.0.0.1 --port 8080
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

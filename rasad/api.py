@@ -1,0 +1,578 @@
+import asyncio
+import json
+import time
+from collections import Counter, defaultdict
+
+from fastapi import Body, FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+
+from . import ai, db, llm
+from . import supervisor as sup_mod
+from .config import settings
+from .supervisor import bus
+from .taxonomy import ENTITY, TOPICS
+from .text import normalize
+
+app = FastAPI(title="Rasad · رصد", version="0.2.0")
+
+
+@app.on_event("startup")
+async def _startup():
+    db.init()
+    from .agents.ingest import sync_sources
+    sync_sources()
+    s = sup_mod.get()
+    asyncio.create_task(s.scheduler())
+
+
+def _auth(token):
+    if settings.admin_token and token != settings.admin_token:
+        raise HTTPException(401, "admin token required")
+
+
+def H(hours):
+    return time.time() - hours * 3600
+
+
+_ecache = {"t": 0, "d": {}}
+
+
+def ent(e):
+    """Gazetteer entity or LLM-discovered entity from DB."""
+    if e in ENTITY:
+        return ENTITY[e]
+    if time.time() - _ecache["t"] > 30:
+        _ecache["d"] = {r["id"]: r for r in db.q("SELECT id,type,name_fa,name_en,name_ar,lat,lon,iso FROM entities WHERE id LIKE 'X:%'")}
+        _ecache["t"] = time.time()
+    r = _ecache["d"].get(e)
+    return dict(r, llm=True) if r else None
+
+
+def story_row(s):
+    s = dict(s)
+    for k in ("topics", "regions", "entities", "verification", "ai"):
+        s[k] = db.jload(s.get(k), [] if k not in ("verification", "ai") else {})
+    s.pop("centroid", None)
+    s["category_fa"] = TOPICS.get(s.get("category"), {}).get("fa")
+    s["color"] = TOPICS.get(s.get("category"), {}).get("color")
+    return s
+
+
+# ---------------- meta / stats ----------------
+@app.get("/api/meta")
+def meta():
+    return {"topics": {k: {"fa": v["fa"], "color": v["color"]} for k, v in TOPICS.items()},
+            "llm": {"configured": llm.available(), "model": llm.cfg()["model"] if llm.available() else None, "tokens_today": llm.tokens_today(),
+                    "budget": llm.cfg()["daily_budget"], "agents": llm.cfg()["agents"]},
+            "version": app.version, "state": sup_mod.get().state()}
+
+
+@app.get("/api/stats")
+def stats(hours: int = 24):
+    since = H(hours)
+    a = db.q1("""SELECT COUNT(*) n, SUM(duplicate_of IS NULL) uniq, COUNT(DISTINCT source_id) src FROM articles WHERE published_at>?""", (since,))
+    last_h = db.q1("SELECT COUNT(*) n FROM articles WHERE published_at>? AND duplicate_of IS NULL", (H(1),))["n"]
+    st = db.q1("SELECT COUNT(*) n FROM stories WHERE last_update>?", (since,))["n"]
+    sig = db.q1("SELECT COUNT(*) n, SUM(severity='critical') c FROM signals WHERE created>? AND status!='dismissed'", (since,))
+    langs = {r["lang"]: r["n"] for r in db.q("SELECT lang, COUNT(*) n FROM articles WHERE published_at>? AND duplicate_of IS NULL GROUP BY lang", (since,))}
+    cats = {r["category"]: r["n"] for r in db.q("SELECT category, COUNT(*) n FROM articles WHERE published_at>? AND duplicate_of IS NULL GROUP BY category", (since,))}
+    hourly = db.q("""SELECT CAST(published_at/3600 AS INT) h, COUNT(*) n FROM articles WHERE published_at>? AND duplicate_of IS NULL GROUP BY h ORDER BY h""", (since,))
+    qa = db.kv_get("qa", {})
+    return {"articles": a["n"], "unique": a["uniq"] or 0, "sources": a["src"], "per_hour_last": last_h, "stories": st,
+            "signals": sig["n"], "critical": sig["c"] or 0, "languages": langs, "categories": cats,
+            "hourly": [{"t": r["h"] * 3600, "n": r["n"]} for r in hourly], "qa": qa,
+            "agents_last": {r["agent"]: r for r in db.q("""SELECT agent,status,output_summary,ended FROM steps WHERE id IN
+                            (SELECT id FROM steps s WHERE ended IS NOT NULL AND ended = (SELECT MAX(ended) FROM steps s2 WHERE s2.agent=s.agent))""")}}
+
+
+# ---------------- articles / stories ----------------
+@app.get("/api/articles")
+def articles(limit: int = 100, offset: int = 0, category: str = None, lang: str = None, q: str = None, source: str = None, hours: int = 72):
+    where, args = ["a.published_at>?", "a.duplicate_of IS NULL"], [H(hours)]
+    if category:
+        where.append("a.category=?"); args.append(category)
+    if lang:
+        where.append("a.lang=?"); args.append(lang)
+    if source:
+        where.append("a.source_id=?"); args.append(source)
+    if q:
+        where.append("a.id IN (SELECT id FROM articles_fts WHERE articles_fts MATCH ?)")
+        args.append(" ".join(f'"{t}"' for t in normalize(q).split()))
+    rows = db.q(f"""SELECT a.id,a.title,a.title_fa,a.lead,a.url,a.lang,a.published_at,a.fetched_at,a.category,a.urgency,a.sentiment,a.story_id,
+                    a.source_id,s.name source_name FROM articles a JOIN sources s ON s.id=a.source_id WHERE {' AND '.join(where)}
+                    ORDER BY a.published_at DESC LIMIT ? OFFSET ?""", (*args, limit, offset))
+    for r in rows:
+        r["color"] = TOPICS.get(r["category"], {}).get("color")
+        r["lead"] = (r["lead"] or "")[:280]
+    return rows
+
+
+@app.get("/api/articles/{aid}")
+def article(aid: str):
+    a = db.q1("""SELECT a.*, s.name source_name, s.credibility, s.ownership_group FROM articles a JOIN sources s ON s.id=a.source_id WHERE a.id=?""", (aid,))
+    if not a:
+        raise HTTPException(404)
+    a["topics"] = db.jload(a["topics"], [])
+    a["entities"] = [dict(ent(m["entity_id"]) or {"id": m["entity_id"]}, surface=m["surface"]) for m in db.q("SELECT * FROM mentions WHERE article_id=?", (aid,))]
+    a["duplicates"] = db.q("SELECT a.id,a.url,s.name source_name FROM articles a JOIN sources s ON s.id=a.source_id WHERE duplicate_of=?", (aid,))
+    return a
+
+
+@app.get("/api/stories")
+def stories(limit: int = 60, hours: int = 48, category: str = None, entity: str = None, min_sources: int = 1):
+    where, args = ["last_update>?", "source_count>=?"], [H(hours), min_sources]
+    if category:
+        where.append("category=?"); args.append(category)
+    if entity:
+        where.append("entities LIKE ?"); args.append(f'%"{entity}"%')
+    return [story_row(s) for s in db.q(f"SELECT * FROM stories WHERE {' AND '.join(where)} ORDER BY score DESC LIMIT ?", (*args, limit))]
+
+
+@app.get("/api/stories/{sid}")
+def story(sid: str):
+    s = db.q1("SELECT * FROM stories WHERE id=?", (sid,))
+    if not s:
+        raise HTTPException(404)
+    s = story_row(s)
+    s["articles"] = db.q("""SELECT a.id,a.title,a.title_fa,a.lead,a.url,a.lang,a.published_at,a.duplicate_of,a.urgency,a.sentiment,a.extraction_method,
+                         s.name source_name,s.id source_id,s.ownership_group,s.credibility FROM articles a JOIN sources s ON s.id=a.source_id
+                         WHERE a.story_id=? ORDER BY a.published_at""", (sid,))
+    s["timeline"] = db.q("SELECT * FROM storyline_events WHERE story_id=? ORDER BY t", (sid,))
+    s["claims"] = [dict(c, evidence=db.jload(c["evidence"], []), contradicted_by=db.jload(c["contradicted_by"], []))
+                   for c in db.q("SELECT * FROM claims WHERE story_id=?", (sid,))]
+    s["entity_objs"] = [x for x in (ent(e) for e in s["entities"]) if x]
+    s["llm_entities"] = db.q("""SELECT DISTINCT e.id,e.type,e.name_fa,e.name_en FROM mentions m JOIN entities e ON e.id=m.entity_id
+                                JOIN articles a ON a.id=m.article_id WHERE a.story_id=? AND e.id LIKE 'X:%'""", (sid,))
+    return s
+
+
+# ---------------- graph / geo / trends ----------------
+@app.get("/api/graph")
+def graph(hours: int = 72, min_weight: int = 2, focus: str = None, limit: int = 400):
+    since = H(hours)
+    ents = {r["entity_id"]: r["n"] for r in db.q("""SELECT m.entity_id, COUNT(*) n FROM mentions m JOIN articles a ON a.id=m.article_id
+                                                  WHERE a.published_at>? AND a.duplicate_of IS NULL GROUP BY m.entity_id""", (since,))}
+    rels = db.q("""SELECT subject_id s, predicate p, object_id o, weight w, evidence FROM relations WHERE last_seen>? AND (weight>=? OR predicate!='co_mentioned')
+                   ORDER BY (predicate!='co_mentioned') DESC, weight DESC LIMIT ?""", (since, min_weight, limit * 3))
+    if focus:
+        nb = {focus} | {r["o"] for r in rels if r["s"] == focus} | {r["s"] for r in rels if r["o"] == focus}
+        rels = [r for r in rels if r["s"] in nb and r["o"] in nb]
+    used = {r["s"] for r in rels} | {r["o"] for r in rels} | ({focus} if focus else set())
+    nodes = [dict(ent(e), mentions=ents.get(e, 0)) for e in used if ent(e)]
+    ok = {n["id"] for n in nodes}
+    return {"nodes": nodes, "predicates": ai.PREDICATES,
+            "links": [{"source": r["s"], "target": r["o"], "weight": r["w"], "predicate": r["p"], "predicate_fa": ai.PREDICATES.get(r["p"]),
+                       "evidence": db.jload(r["evidence"], [])[-3:]} for r in rels if r["s"] in ok and r["o"] in ok]}
+
+
+@app.get("/api/path")
+def path(a: str, b: str, hours: int = 168):
+    rels = db.q("SELECT subject_id s, object_id o, weight w FROM relations WHERE last_seen>?", (H(hours),))
+    adj = defaultdict(set)
+    for r in rels:
+        adj[r["s"]].add(r["o"]); adj[r["o"]].add(r["s"])
+    prev, frontier, seen = {}, [a], {a}
+    while frontier and b not in seen:
+        nxt = []
+        for x in frontier:
+            for y in adj[x]:
+                if y not in seen:
+                    seen.add(y); prev[y] = x; nxt.append(y)
+        frontier = nxt
+    if b not in seen:
+        return {"path": []}
+    p = [b]
+    while p[-1] != a:
+        p.append(prev[p[-1]])
+    return {"path": [ent(x) or {"id": x} for x in reversed(p)]}
+
+
+@app.get("/api/geo")
+def geo(hours: int = 48):
+    since = H(hours)
+    pts = db.q("""SELECT m.entity_id e, a.category c, COUNT(*) n, AVG(a.sentiment) s FROM mentions m JOIN articles a ON a.id=m.article_id
+                  WHERE a.published_at>? AND a.duplicate_of IS NULL GROUP BY m.entity_id, a.category""", (since,))
+    agg = defaultdict(lambda: {"n": 0, "cats": Counter(), "s": 0.0})
+    for p in pts:
+        E = ent(p["e"])
+        if E and E.get("lat") is not None:
+            g = agg[p["e"]]
+            g["n"] += p["n"]; g["cats"][p["c"]] += p["n"]; g["s"] += (p["s"] or 0) * p["n"]
+    points = []
+    for e, g in agg.items():
+        E = ent(e)
+        cat = g["cats"].most_common(1)[0][0]
+        points.append({**E, "n": g["n"], "category": cat, "color": TOPICS.get(cat, {}).get("color"), "sentiment": round(g["s"] / g["n"], 2)})
+    arcs = []
+    for r in db.q("SELECT subject_id s, object_id o, weight w FROM relations WHERE last_seen>? AND weight>=2 ORDER BY weight DESC LIMIT 150", (since,)):
+        A, B = ent(r["s"]), ent(r["o"])
+        if A and B and A["type"] == "GPE" and B["type"] == "GPE" and A.get("lat") is not None and B.get("lat") is not None:
+            arcs.append({"from": A["id"], "to": B["id"], "fromName": A["name_fa"], "toName": B["name_fa"], "coords": [[A["lon"], A["lat"]], [B["lon"], B["lat"]]], "w": r["w"]})
+    return {"points": points, "arcs": arcs}
+
+
+@app.get("/api/trends")
+def trends(hours: int = 48, bucket: int = 3600):
+    rows = db.q("""SELECT CAST(published_at/? AS INT)*? t, category c, COUNT(*) n FROM articles WHERE published_at>? AND duplicate_of IS NULL
+                   GROUP BY t, c ORDER BY t""", (bucket, bucket, H(hours)))
+    reg = db.q("""SELECT m.entity_id e, a.category c, COUNT(*) n FROM mentions m JOIN articles a ON a.id=m.article_id
+                  WHERE a.published_at>? AND a.duplicate_of IS NULL AND length(m.entity_id)=2 GROUP BY e, c ORDER BY n DESC""", (H(hours),))
+    top_regions = [e for e, _ in Counter({r["e"]: 0 for r in reg}).items()]
+    tot = Counter()
+    for r in reg:
+        tot[r["e"]] += r["n"]
+    top_regions = [e for e, _ in tot.most_common(14)]
+    return {"river": [{"t": r["t"], "category": r["c"], "n": r["n"]} for r in rows],
+            "heat": [{"region": r["e"], "region_fa": ENTITY[r["e"]]["name_fa"], "category": r["c"], "n": r["n"]} for r in reg if r["e"] in top_regions],
+            "regions": [{"id": e, "fa": ENTITY[e]["name_fa"]} for e in top_regions]}
+
+
+# ---------------- sources ----------------
+@app.get("/api/sources")
+def sources():
+    rows = db.q("SELECT * FROM sources ORDER BY status, name")
+    day = H(24)
+    for s in rows:
+        st = db.q1("""SELECT COUNT(*) n, AVG(extraction_quality) q FROM articles WHERE source_id=? AND published_at>?""", (s["id"], day))
+        s["items_24h"], s["extract_q"] = st["n"], round(st["q"] or 0, 2)
+        # speed: median minutes behind the first report of shared stories
+        lags = db.q("""SELECT a.published_at - st.first_seen lag FROM articles a JOIN stories st ON st.id=a.story_id
+                       WHERE a.source_id=? AND st.source_count>=2 AND a.published_at>?""", (s["id"], day))
+        L = sorted(max(0, r["lag"]) / 60 for r in lags)
+        s["lag_median_min"] = round(L[len(L) // 2], 1) if L else None
+        s["first_reports"] = sum(1 for x in L if x == 0)
+        s["meta"] = db.jload(s["meta"], {})
+        s.pop("etag", None); s.pop("modified", None)
+    return {"sources": rows, "scout": db.kv_get("scout_report", {})}
+
+
+@app.post("/api/sources/{sid}/status")
+def set_source_status(sid: str, body: dict = Body(...), x_admin_token: str = Header(None)):
+    _auth(x_admin_token)
+    status = body.get("status")
+    if status not in ("active", "disabled", "pending"):
+        raise HTTPException(400)
+    with db.tx() as c:
+        c.execute("UPDATE sources SET status=?, fail_count=0 WHERE id=?", (status, sid))
+    db.audit("user", f"source:{status}", sid)
+    return {"ok": True}
+
+
+@app.get("/api/compare/{sid}")
+def compare(sid: str):
+    s = story(sid)
+    groups = defaultdict(list)
+    for a in s["articles"]:
+        groups[a["source_name"]].append(a)
+    first = s["first_seen"]
+    return {"story": {k: s[k] for k in ("id", "title", "title_fa", "first_seen")},
+            "sources": [{"source": k, "lag_min": round((v[0]["published_at"] - first) / 60, 1), "n": len(v), "lang": v[0]["lang"],
+                         "sentiment": round(sum(x["sentiment"] or 0 for x in v) / len(v), 2), "headline": v[0]["title"], "url": v[0]["url"]}
+                        for k, v in groups.items()]}
+
+
+# ---------------- signals / briefs / qa ----------------
+@app.get("/api/signals")
+def signals(hours: int = 72):
+    rows = db.q("SELECT * FROM signals WHERE created>? ORDER BY created DESC LIMIT 200", (H(hours),))
+    for r in rows:
+        r["story_ids"] = db.jload(r["story_ids"], []); r["explanation"] = db.jload(r["explanation"], {}); r["ai"] = db.jload(r.get("ai"), None)
+    return rows
+
+
+@app.post("/api/signals/{gid}/status")
+def signal_status(gid: int, body: dict = Body(...), x_admin_token: str = Header(None)):
+    _auth(x_admin_token)
+    with db.tx() as c:
+        c.execute("UPDATE signals SET status=? WHERE id=?", (body.get("status", "ack"), gid))
+    db.audit("user", "signal:" + body.get("status", "ack"), str(gid))
+    return {"ok": True}
+
+
+@app.get("/api/briefs")
+def briefs(limit: int = 30):
+    return db.q("SELECT id,created,title,status,stats,edited_by_user FROM briefs ORDER BY id DESC LIMIT ?", (limit,))
+
+
+@app.get("/api/briefs/{bid}")
+def brief(bid: int):
+    b = db.q1("SELECT * FROM briefs WHERE id=?", (bid,))
+    if not b:
+        raise HTTPException(404)
+    return b
+
+
+@app.get("/api/briefs/{bid}.md", response_class=PlainTextResponse)
+def brief_md(bid: int):
+    return brief(bid)["markdown"]
+
+
+@app.get("/api/qa")
+def qa():
+    return {"current": db.kv_get("qa", {}), "history": db.kv_get("qa_history", [])[-100:], "judge": db.kv_get("qa_judge")}
+
+
+@app.get("/api/presentation")
+def presentation():
+    return db.kv_get("presentation", {"scenes": []})
+
+
+@app.get("/api/search")
+def search(q: str, limit: int = 20):
+    nq = normalize(q)
+    ents = [e for e in ENTITY.values() if nq and (nq in normalize(e["name_fa"]) or nq in e["name_en"].lower() or nq in normalize(e["name_ar"]))][:8]
+    sts = db.q("SELECT id,title,title_fa,category FROM stories WHERE title LIKE ? OR title_fa LIKE ? ORDER BY score DESC LIMIT ?", (f"%{q}%", f"%{q}%", limit))
+    arts = articles(limit=limit, q=q, hours=24 * 30) if q.strip() else []
+    return {"entities": ents, "stories": sts, "articles": arts}
+
+
+# ---------------- AI: config / usage / interactive ----------------
+@app.get("/api/ai/config")
+def ai_config():
+    return {**llm.public_cfg(), "agents_fa": llm.AI_AGENTS}
+
+
+@app.post("/api/ai/config")
+def ai_config_set(body: dict = Body(...), x_admin_token: str = Header(None)):
+    _auth(x_admin_token)
+    db.audit("user", "ai:config", "", {k: v for k, v in body.items() if k != "api_key"} | ({"api_key": "***"} if body.get("api_key") else {}))
+    return llm.update_cfg(body)
+
+
+@app.post("/api/ai/test")
+async def ai_test(x_admin_token: str = Header(None)):
+    _auth(x_admin_token)
+    try:
+        return await asyncio.to_thread(llm.test_connection)
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
+@app.get("/api/ai/models")
+async def ai_models():
+    try:
+        return {"models": await asyncio.to_thread(llm.list_models)}
+    except Exception as e:
+        return {"models": [], "error": str(e)[:200]}
+
+
+@app.get("/api/ai/usage")
+def ai_usage(days: int = 7):
+    return llm.usage(days)
+
+
+def _sse(obj):
+    return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+
+
+@app.post("/api/ask")
+async def ask(body: dict = Body(...)):
+    question = (body.get("question") or "").strip()[:1200]
+    history = [m for m in (body.get("history") or [])[-6:] if m.get("role") in ("user", "assistant")]
+    hours = int(body.get("hours") or 168)
+    if not question:
+        raise HTTPException(400, "question required")
+
+    async def gen():
+        if not llm.agent_enabled("ask"):
+            yield _sse({"type": "error", "error": "دستیار تحلیلی غیرفعال است یا سقف توکن روزانه تمام شده؛ تنظیمات هوش مصنوعی را بررسی کنید."}); return
+        arts = await asyncio.to_thread(ai.retrieve, question, 14, hours)
+        cites = [{"n": i + 1, "id": a["id"], "story_id": a["story_id"], "source": a["sname"], "title": a.get("title_fa") or a["title"],
+                  "url": a["url"], "lang": a["lang"], "t": a["published_at"]} for i, a in enumerate(arts)]
+        yield _sse({"type": "sources", "items": cites})
+        msgs = [{"role": m["role"], "content": str(m.get("content", ""))[:3000]} for m in history]
+        msgs.append({"role": "user", "content": f"اسناد بازیابی‌شده:\n{llm.wrap(ai.ask_context(arts), 14000)}\n\nپرسش: {question}"})
+        out = []
+        try:
+            async for d in llm.stream(ai.ASK_SYSTEM.format(now=time.strftime("%Y-%m-%d %H:%M")), msgs, 1600, "ask", "chat"):
+                out.append(d)
+                yield _sse({"type": "delta", "text": d})
+        except Exception as e:
+            yield _sse({"type": "error", "error": str(e)[:300]}); return
+        ans = "".join(out)
+        used = sorted({int(n) for n in __import__("re").findall(r"\[(\d+)\]", ans) if 1 <= int(n) <= len(cites)})
+        with db.tx() as c:
+            cur = c.execute("INSERT INTO chats(ts,question,answer,citations,tokens) VALUES(?,?,?,?,?)",
+                            (time.time(), question, ans, db.jdump([x for x in cites if x["n"] in used]), 0))
+        yield _sse({"type": "done", "chat_id": cur.lastrowid, "used": used})
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/ask/history")
+def ask_history(limit: int = 20):
+    return [dict(r, citations=db.jload(r["citations"], [])) for r in db.q("SELECT * FROM chats ORDER BY id DESC LIMIT ?", (limit,))]
+
+
+@app.post("/api/stories/{sid}/analyze")
+async def story_analyze(sid: str, body: dict = Body(default={})):
+    s = db.q1("SELECT ai FROM stories WHERE id=?", (sid,))
+    if not s:
+        raise HTTPException(404)
+    cur = db.jload(s["ai"], {}) or {}
+    if cur.get("deep") and not body.get("force"):
+        return cur["deep"]
+    if not llm.agent_enabled("analyze"):
+        raise HTTPException(503, "تحلیل هوش مصنوعی غیرفعال است")
+    try:
+        d, used = await asyncio.to_thread(ai.deep_analyze, sid)
+    except Exception as e:
+        raise HTTPException(502, f"خطای مدل زبانی: {str(e)[:200]}")
+    d["tokens"] = used
+    db.merge_json("stories", "id", sid, "ai", {"deep": d})
+    db.audit("user", "ai:analyze", sid, {"tokens": used})
+    return d
+
+
+@app.post("/api/briefs/custom")
+async def brief_custom(body: dict = Body(...)):
+    topic, entity, hours = body.get("topic") or None, body.get("entity") or None, int(body.get("hours") or 24)
+    if not llm.agent_enabled("analyze"):
+        raise HTTPException(503, "تحلیل هوش مصنوعی غیرفعال است")
+
+    def build():
+        stories, refs, lines = ai.custom_brief(topic, entity, hours)
+        if not stories:
+            return None
+        d, used = ai.write_brief(refs, "\n".join(lines), "-", agent="analyze")
+        n = len(refs)
+        scope = " · ".join(x for x in ((TOPICS.get(topic, {}).get("fa") if topic else None), ((ent(entity) or {}).get("name_fa") if entity else None)) if x) or "همه موضوع‌ها"
+        title = f"بریف موضوعی — {scope} — {hours} ساعت اخیر — {time.strftime('%Y-%m-%d %H:%M')}"
+        md = [f"# {title}", ""]
+        for key, head in (("bluf", "جمع‌بندی (BLUF)"), ("executive_summary", "خلاصه مدیریتی")):
+            t, _ = ai.citation_guard(d.get(key, ""), n)
+            if t:
+                md += [f"## {head}", t, ""]
+        sec = []
+        for a in (d.get("analysis") or [])[:6]:
+            t, _ = ai.citation_guard(a.get("text", ""), n)
+            if t:
+                sec += [f"### {a.get('heading', '')}", t, ""]
+        if sec:
+            md += ["## تحلیل", *sec]
+        if d.get("outlook"):
+            md += ["## چشم‌انداز", d["outlook"], ""]
+        md += ["## داستان‌های مبنا", *lines, "", "## منابع"]
+        md += [f"{i+1}. [{r['title']}]({r['url']}) — {r['sname']}" for i, r in enumerate(refs)]
+        with db.tx() as c:
+            cur = c.execute("INSERT INTO briefs(created,title,markdown,status,run_id,stats) VALUES(?,?,?,?,?,?)",
+                            (time.time(), title, "\n".join(md), "draft", "custom",
+                             db.jdump({"stories": len(stories), "refs": n, "ai": True, "custom": {"topic": topic, "entity": entity, "hours": hours}, "tokens": used,
+                                       "refs_list": [{"sname": r["sname"], "title": r["title"]} for r in refs]})))
+        return cur.lastrowid
+
+    try:
+        bid = await asyncio.to_thread(build)
+    except Exception as e:
+        raise HTTPException(502, f"خطای مدل زبانی: {str(e)[:200]}")
+    if not bid:
+        raise HTTPException(404, "داستانی با این فیلتر یافت نشد")
+    db.audit("user", "ai:custom_brief", str(bid), body)
+    bus.publish({"type": "data_changed"})
+    return {"id": bid}
+
+
+@app.post("/api/articles/{aid}/translate")
+async def article_translate(aid: str):
+    a = db.q1("SELECT id,title,lead,text,lang,title_fa,lead_fa FROM articles WHERE id=?", (aid,))
+    if not a:
+        raise HTTPException(404)
+    if a["lead_fa"]:
+        return {"title_fa": a["title_fa"], "lead_fa": a["lead_fa"]}
+    if not llm.agent_enabled("translator"):
+        raise HTTPException(503, "مترجم غیرفعال است")
+
+    def run():
+        d, _ = llm.chat_json('عنوان و متن خبر را به فارسی معیار ترجمه کن؛ متن را حداکثر در ۱۲۰ کلمه خلاصه-ترجمه کن. {"title_fa":"","lead_fa":""}',
+                             llm.wrap(f"TITLE: {a['title']}\nTEXT: {(a['text'] or a['lead'] or '')[:3500]}", 4000), 900, "translator", "article_on_demand")
+        with db.tx() as c:
+            c.execute("UPDATE articles SET title_fa=COALESCE(title_fa,?),lead_fa=?,translated_by=? WHERE id=?",
+                      (d.get("title_fa"), d.get("lead_fa"), "llm:" + llm.cfg()["model"], aid))
+        return d
+    try:
+        return await asyncio.to_thread(run)
+    except Exception as e:
+        raise HTTPException(502, str(e)[:200])
+
+
+# ---------------- runs / pipeline control ----------------
+@app.get("/api/state")
+def state():
+    return sup_mod.get().state()
+
+
+@app.get("/api/runs")
+def runs(limit: int = 30):
+    rows = db.q("SELECT * FROM runs ORDER BY started DESC LIMIT ?", (limit,))
+    for r in rows:
+        r["summary"] = db.jload(r["summary"], {})
+    return rows
+
+
+@app.get("/api/runs/{rid}")
+def run(rid: str):
+    r = db.q1("SELECT * FROM runs WHERE id=?", (rid,))
+    if not r:
+        raise HTTPException(404)
+    r["summary"] = db.jload(r["summary"], {})
+    r["steps"] = [dict(s, output=db.jload(s["output"], s["output"])) for s in db.q("SELECT * FROM steps WHERE run_id=? ORDER BY idx", (rid,))]
+    return r
+
+
+@app.post("/api/control")
+async def control(body: dict = Body(...), x_admin_token: str = Header(None)):
+    _auth(x_admin_token)
+    action = body.pop("action", None)
+    return await sup_mod.get().control(action, **body)
+
+
+@app.post("/api/steps/{step_id}/decision")
+async def decision(step_id: str, body: dict = Body(...), x_admin_token: str = Header(None)):
+    _auth(x_admin_token)
+    return sup_mod.get().decide(step_id, body.get("decision", "approve"), body.get("edited_output"))
+
+
+@app.post("/api/rerun/{agent}")
+async def rerun(agent: str, x_admin_token: str = Header(None)):
+    _auth(x_admin_token)
+    return await sup_mod.get().rerun(agent)
+
+
+@app.get("/api/audit")
+def audit(limit: int = 100):
+    return db.q("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,))
+
+
+@app.get("/api/events")
+async def events(request: Request):
+    q = bus.subscribe()
+
+    async def gen():
+        try:
+            yield f"data: {json.dumps({'type': 'state', 'state': sup_mod.get().state()}, ensure_ascii=False)}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=15)
+                    yield f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+        finally:
+            bus.unsubscribe(q)
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True, "db": str(settings.db_path), "state": sup_mod.get().status}
+
+
+app.mount("/static", StaticFiles(directory=str(settings.web_dir)), name="static")
+
+
+@app.get("/")
+def index():
+    return FileResponse(settings.web_dir / "index.html")

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="fa" dir="rtl" data-theme="dark">
+<head>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Ccircle cx=%2216%22 cy=%2216%22 r=%2213%22 fill=%22none%22 stroke=%22%235e9fe8%22 stroke-width=%225%22/%3E%3C/svg%3E">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>رصد · سامانه چندعاملی پایش خبر</title>
+<link rel="stylesheet" href="/static/css/app.css">
+<script src="/static/vendor/echarts.min.js"></script>
+<script src="/static/vendor/marked.min.js"></script>
+</head>
+<body>
+<div class="shell">
+  <header class="topbar">
+    <div class="brand"><div class="logo"></div><div>رصد<br><small>پایش چندعاملی خبر</small></div></div>
+    <div class="search" id="openPalette">⌕ جست‌وجوی موجودیت، داستان، خبر یا فرمان… <kbd>Ctrl K</kbd></div>
+    <div class="tb-spacer"></div>
+    <span class="status-pill" id="runPill"><span class="dot"></span><span>—</span></span>
+    <div class="seg" id="modeSeg" title="سطح اجرا">
+      <button data-mode="manual">دستی</button><button data-mode="supervised">نظارتی</button><button data-mode="autopilot">خودکار</button>
+    </div>
+    <button class="btn danger" id="killBtn" title="کلید توقف اضطراری">⏻ توقف اضطراری</button>
+    <button class="icon-btn" id="presentBtn" title="حالت نمایش">▶</button>
+    <button class="icon-btn" id="themeBtn" title="تم">◐</button>
+  </header>
+  <div class="body" id="body">
+    <nav class="rail" id="rail"></nav>
+    <main class="main" id="main">
+      <section class="view" id="view"></section>
+      <section class="drawer" id="drawer">
+        <div class="drawer-h"><button class="tab on" data-tab="feed">جریان زنده خبر</button><button class="tab" data-tab="log">لاگ عامل‌ها</button><button class="tab" data-tab="signals">هشدارها</button>
+          <span class="tb-spacer"></span><span class="small dim" id="drawerMeta"></span></div>
+        <div class="drawer-b" id="drawerBody"></div>
+      </section>
+    </main>
+    <aside class="side" id="side"></aside>
+  </div>
+</div>
+<div class="overlay" id="palOv"><div class="palette"><input id="palIn" placeholder="جست‌وجو یا فرمان… (مثلاً «هرمز»، «اجرا»، «گراف»)"><div class="items" id="palItems"></div></div></div>
+<div class="toasts" id="toasts"></div>
+<div class="present" id="present"><div id="presentGlobe" style="position:absolute;inset:0"></div><div class="steps" id="pSteps"></div>
+  <div class="cap" id="pCap"></div><div class="ctl"><button class="btn" id="pPrev">قبلی</button><button class="btn" id="pNext">بعدی</button><button class="btn" id="pClose">خروج (Esc)</button></div></div>
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

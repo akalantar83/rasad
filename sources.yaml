@@ -1,0 +1,33 @@
+# Rasad source registry. status: active | pending (needs human approval via Source Scout) | disabled
+# ownership_group is used by the Verifier: sources in the same group are NOT independent.
+# credibility is a prior (0..1) that the Source Scout adjusts from observed health.
+sources:
+  - {id: bbc-persian, name: "BBC فارسی", url: "https://feeds.bbci.co.uk/persian/rss.xml", lang: fa, country: GB, type: news, ownership_group: bbc, credibility: 0.8}
+  - {id: dw-persian, name: "DW فارسی", url: "https://rss.dw.com/rdf/rss-per-all", lang: fa, country: DE, type: news, ownership_group: dw, credibility: 0.8}
+  - {id: irna, name: "ایرنا", url: "https://www.irna.ir/rss", lang: fa, country: IR, type: official, ownership_group: ir-state, credibility: 0.65}
+  - {id: isna, name: "ایسنا", url: "https://www.isna.ir/rss", lang: fa, country: IR, type: news, ownership_group: isna, credibility: 0.65}
+  - {id: donya-e-eqtesad, name: "دنیای اقتصاد", url: "https://donya-e-eqtesad.com/fa/feeds/?p=Y2F0ZWdvcmllcz0x", lang: fa, country: IR, type: news, ownership_group: donya, credibility: 0.7}
+  - {id: bbc-arabic, name: "BBC عربی", url: "https://feeds.bbci.co.uk/arabic/rss.xml", lang: ar, country: GB, type: news, ownership_group: bbc, credibility: 0.8}
+  - {id: aljazeera-ar, name: "الجزیره عربی", url: "https://www.aljazeera.net/aljazeerarss/a7c186be-1baa-4bd4-9d80-a84db769f779/73d0e1b4-532f-45ef-b135-bfdff8b8cab9", lang: ar, country: QA, type: news, ownership_group: aljazeera, credibility: 0.7}
+  - {id: skynews-ar, name: "اسکای‌نیوز عربی", url: "https://www.skynewsarabia.com/rss", lang: ar, country: AE, type: news, ownership_group: skynews-ar, credibility: 0.65}
+  - {id: france24-ar, name: "فرانس۲۴ عربی", url: "https://www.france24.com/ar/rss", lang: ar, country: FR, type: news, ownership_group: france24, credibility: 0.75}
+  - {id: bbc-world, name: "BBC World", url: "https://feeds.bbci.co.uk/news/world/rss.xml", lang: en, country: GB, type: news, ownership_group: bbc, credibility: 0.85}
+  - {id: aljazeera-en, name: "Al Jazeera English", url: "https://www.aljazeera.com/xml/rss/all.xml", lang: en, country: QA, type: news, ownership_group: aljazeera, credibility: 0.7}
+  - {id: guardian-world, name: "The Guardian World", url: "https://www.theguardian.com/world/rss", lang: en, country: GB, type: news, ownership_group: guardian, credibility: 0.8}
+  - {id: npr-world, name: "NPR World", url: "https://feeds.npr.org/1004/rss.xml", lang: en, country: US, type: news, ownership_group: npr, credibility: 0.8}
+  - {id: dw-en, name: "DW English", url: "https://rss.dw.com/rdf/rss-en-world", lang: en, country: DE, type: news, ownership_group: dw, credibility: 0.8}
+  - {id: france24-en, name: "France 24 English", url: "https://www.france24.com/en/rss", lang: en, country: FR, type: news, ownership_group: france24, credibility: 0.75}
+  - {id: un-news, name: "UN News", url: "https://news.un.org/feed/subscribe/en/news/all/rss.xml", lang: en, country: INT, type: official, ownership_group: un, credibility: 0.85}
+  - {id: cnbc-world, name: "CNBC World", url: "https://www.cnbc.com/id/100727362/device/rss/rss.html", lang: en, country: US, type: markets, ownership_group: nbcu, credibility: 0.75}
+  - {id: oilprice, name: "OilPrice.com", url: "https://oilprice.com/rss/main", lang: en, country: US, type: energy, ownership_group: oilprice, credibility: 0.6}
+  - {id: gcaptain, name: "gCaptain", url: "https://gcaptain.com/feed/", lang: en, country: US, type: maritime, ownership_group: gcaptain, credibility: 0.75}
+  - {id: splash247, name: "Splash247", url: "https://splash247.com/feed/", lang: en, country: SG, type: maritime, ownership_group: asia-shipping-media, credibility: 0.7}
+  - {id: freightwaves, name: "FreightWaves", url: "https://www.freightwaves.com/news/feed", lang: en, country: US, type: logistics, ownership_group: freightwaves, credibility: 0.7}
+  - {id: theloadstar, name: "The Loadstar", url: "https://theloadstar.com/feed/", lang: en, country: GB, type: logistics, ownership_group: loadstar, credibility: 0.75}
+  - {id: crisisgroup, name: "Crisis Group", url: "https://www.crisisgroup.org/rss", lang: en, country: INT, type: think-tank, ownership_group: crisisgroup, credibility: 0.85}
+  - {id: atlanticcouncil, name: "Atlantic Council", url: "https://www.atlanticcouncil.org/feed/", lang: en, country: US, type: think-tank, ownership_group: atlanticcouncil, credibility: 0.75}
+  - {id: gdelt-chokepoints, name: "GDELT · Chokepoints & Sanctions", kind: gdelt, url: "https://api.gdeltproject.org/api/v2/doc/doc", query: "(hormuz OR \"red sea\" OR \"bab el-mandeb\" OR \"suez canal\" OR OPEC OR sanctions) sourcelang:english", lang: en, country: INT, type: event-db, ownership_group: gdelt, credibility: 0.5}
+  # Candidates: validated by the Source Scout, activated only by a human.
+  - {id: radiofarda, name: "رادیو فردا", url: "https://www.radiofarda.com/api/zrqiteuuir", lang: fa, country: CZ, type: news, ownership_group: rferl, credibility: 0.7, status: pending}
+  - {id: euronews-fa, name: "یورونیوز فارسی", url: "https://parsi.euronews.com/rss", lang: fa, country: FR, type: news, ownership_group: euronews, credibility: 0.7, status: pending}
+  - {id: hellenic-shipping, name: "Hellenic Shipping News", url: "https://www.hellenicshippingnews.com/feed/", lang: en, country: GR, type: maritime, ownership_group: hellenic, credibility: 0.6, status: pending}
