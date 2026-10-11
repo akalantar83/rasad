@@ -33,7 +33,7 @@ class Settings:
     fetch_concurrency = int(_env("RASAD_FETCH_CONCURRENCY", "8"))
     fetch_fulltext = _env("RASAD_FULLTEXT", "1") == "1"
     fulltext_per_run = int(_env("RASAD_FULLTEXT_PER_RUN", "60"))
-    user_agent = _env("RASAD_UA", "RasadBot/0.3 (+self-hosted news monitor; respects robots.txt)")
+    user_agent = _env("RASAD_UA", "RasadBot/0.4 (+self-hosted news monitor; respects robots.txt)")
     # Optional OpenAI-compatible LLM endpoint (LiteLLM / Ollama / vLLM / cloud)
     llm_base_url = _env("LLM_BASE_URL")  # e.g. http://localhost:11434/v1
     llm_api_key = _env("LLM_API_KEY", "none")
@@ -55,6 +55,7 @@ class Settings:
     backup_keep = int(_env("RASAD_BACKUP_KEEP", "7"))
     retention_days = int(_env("RASAD_RETENTION_DAYS", "60"))
     public_url = _env("RASAD_PUBLIC_URL", "http://localhost:8080")
+    tz = _env("RASAD_TZ", "Asia/Tehran")
 
 
 settings = Settings()

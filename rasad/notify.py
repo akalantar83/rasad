@@ -209,3 +209,69 @@ def _safe(fn, *a):
 def deliveries(limit=100):
     return db.q("""SELECT d.*, c.name channel_name, c.type channel_type FROM deliveries d LEFT JOIN channels c ON c.id=d.channel_id
                    ORDER BY d.id DESC LIMIT ?""", (limit,))
+
+
+# ---------------- scheduled digest ----------------
+DIGEST_DEFAULT = {"enabled": False, "hour": 8, "hours": 24, "top": 8}
+
+
+def digest_cfg():
+    return {**DIGEST_DEFAULT, **(db.kv_get("digest_cfg") or {})}
+
+
+def set_digest_cfg(body):
+    cfg = digest_cfg()
+    if "enabled" in body:
+        cfg["enabled"] = bool(body["enabled"])
+    for k, lo, hi in (("hour", 0, 23), ("hours", 6, 168), ("top", 3, 20)):
+        if k in body:
+            v = int(body[k])
+            if not lo <= v <= hi:
+                raise ValueError(f"{k} باید بین {lo} و {hi} باشد")
+            cfg[k] = v
+    db.kv_set("digest_cfg", cfg)
+    return cfg
+
+
+def _now_local():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    try:
+        return datetime.now(ZoneInfo(settings.tz))
+    except Exception:  # noqa: BLE001
+        return datetime.now()
+
+
+def digest_text(hours=24, top=8):
+    since = time.time() - hours * 3600
+    stories = db.q("""SELECT id,title,title_fa,source_count,lang_count,urgency FROM stories WHERE last_update>?
+                      ORDER BY score DESC LIMIT ?""", (since, top))
+    sigs = db.q("""SELECT label,severity FROM signals WHERE created>? AND severity IN ('warning','critical')
+                   ORDER BY CASE severity WHEN 'critical' THEN 0 ELSE 1 END, score DESC LIMIT 6""", (since,))
+    n_art = db.q1("SELECT COUNT(*) n FROM articles WHERE published_at>? AND duplicate_of IS NULL", (since,))["n"]
+    lines = [f"{n_art} خبر یکتا · {len(stories)} داستان برتر · {len(sigs)} هشدار در {hours} ساعت گذشته", ""]
+    for i, s in enumerate(stories, 1):
+        flag = " ⚡" if s["urgency"] == "flash" else ""
+        lines.append(f"{i}. {s['title_fa'] or s['title']} ({s['source_count']} منبع){flag}")
+    if sigs:
+        lines += ["", "هشدارها:"] + [("🔴 " if g["severity"] == "critical" else "🟠 ") + g["label"] for g in sigs]
+    return "\n".join(lines), {"stories": len(stories), "signals": len(sigs), "articles": n_art}
+
+
+def dispatch_digest(force=False):
+    """Send the shift digest to brief-enabled channels once per local day (at/after the configured hour)."""
+    cfg = digest_cfg()
+    now = _now_local()
+    if not force and (not cfg["enabled"] or now.hour < cfg["hour"]):
+        return None
+    day = now.strftime("%Y-%m-%d")
+    ref = f"digest:{day}" + (f":{int(time.time())}" if force else "")
+    text, stats = digest_text(cfg["hours"], cfg["top"])
+    title = f"خلاصه روزانه رصد · {day}"
+    n = 0
+    for ch in db.q("SELECT * FROM channels WHERE enabled=1 AND briefs=1"):
+        if _deliver(ch, ref, title, text, settings.public_url, {"kind": "digest", **stats}):
+            n += 1
+    if n or force:
+        db.kv_set("last_digest", {"t": time.time(), "day": day, "sent": n})
+    return {"sent": n, "title": title, "text": text, "stats": stats}

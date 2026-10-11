@@ -112,8 +112,8 @@ def init():
             if col not in cols:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
         c.commit()
-    from . import auth, notify, watch  # noqa: E402  (module schemas)
-    for m in (auth, notify, watch):
+    from . import auth, notify, triage, watch  # noqa: E402  (module schemas)
+    for m in (auth, notify, watch, triage):
         m.init()
 
 

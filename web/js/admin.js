@@ -118,7 +118,7 @@ const CH_FIELDS = {
   webhook: [["url", "آدرس وب‌هوک", "password", "https://hooks.slack.com/…"], ["header_name", "سرآیند اختیاری (نام)", "text", "Authorization"], ["header_value", "سرآیند اختیاری (مقدار)", "text", "Bearer …"]],
   email: [["host", "سرور SMTP", "text", "smtp.example.com"], ["port", "پورت", "text", "587"], ["user", "نام کاربری SMTP", "text", ""], ["password", "رمز SMTP", "password", ""], ["sender", "فرستنده", "text", "rasad@example.com"], ["to", "گیرندگان (با ویرگول)", "text", "team@example.com"], ["starttls", "STARTTLS", "select", { "1": "بله", "0": "خیر" }]],
 };
-const SIG_TYPES = { spike: "جهش حجم", emerging_actor: "بازیگر نوظهور", fast_spread: "گسترش سریع", watch: "فهرست پایش" };
+const SIG_TYPES = { volume_spike: "جهش حجم موضوع", entity_spike: "جهش اشاره به بازیگر", new_actor: "بازیگر نوظهور", fast_spread: "گسترش سریع", watch: "فهرست پایش" };
 function channelForm(c = {}) {
   const typ = c.type || "telegram", cfg = c.config || {};
   const fields = (t) => CH_FIELDS[t].map(([k, l, ty, ph]) => ty === "select" ? `<label>${l}<select name="cfg_${k}">${opt(ph, String(cfg[k] === true ? "1" : cfg[k] === false ? "0" : cfg[k] ?? Object.keys(ph)[0]))}</select></label>`
@@ -138,12 +138,19 @@ function packChannel(x) {
   return { name: x.name, type: x.type, config, min_severity: x.min_severity, signal_types: x.signal_types || [], briefs: x.briefs, enabled: x.enabled };
 }
 async function channels(box, side) {
-  const [{ channels: list }, dels] = await Promise.all([api("/api/notify/channels"), api("/api/notify/deliveries?limit=60")]);
+  const [{ channels: list }, dels, dg] = await Promise.all([api("/api/notify/channels"), api("/api/notify/deliveries?limit=60"), api("/api/notify/digest")]);
   const ICON = { telegram: "✈", webhook: "⌁", email: "✉" };
   box.innerHTML = `<div class="card-h bare"><h3>کانال‌ها <span class="badge">${fa(list.length)}</span></h3><span class="tb-spacer"></span><button class="btn primary sm" id="cAdd">＋ کانال جدید</button></div>
    <div class="grid cards3">${list.map((c) => `<div class="card ch-card ${c.enabled ? "" : "is-off"}"><div class="ch-top"><span class="ch-ic t-${c.type}">${ICON[c.type] || "•"}</span><div style="min-width:0;flex:1"><b>${esc(c.name)}</b><div class="small dim">${esc(c.type_fa)}</div></div>${yes(c.enabled)}</div>
      <div class="kv small" style="margin:10px 0"><dt>حداقل شدت</dt><dd>${SEV_FA[c.min_severity]}</dd><dt>سیگنال‌ها</dt><dd>${c.signal_types.length ? c.signal_types.map((t) => SIG_TYPES[t] || t).join("، ") : "همه"}</dd><dt>بریف</dt><dd>${c.briefs ? "بله" : "خیر"}</dd>${Object.entries(c.config).filter(([k]) => !["starttls", "port", "header_value"].includes(k)).slice(0, 2).map(([k, v]) => `<dt>${esc(k)}</dt><dd dir="ltr" style="text-align:right">${esc(String(v))}</dd>`).join("")}</div>
      <div class="toolbar" style="margin:0"><button class="btn sm" data-test="${c.id}">ارسال آزمایشی</button><button class="btn ghost sm" data-edit="${c.id}">ویرایش</button><button class="btn ghost sm danger" data-del="${c.id}">حذف</button></div></div>`).join("") || '<div class="card empty">هنوز کانالی تعریف نشده است. هشدارهای بحرانی و بریف‌ها را به تلگرام، Slack/وب‌هوک یا ایمیل بفرستید.</div>'}</div>
+   <div class="card digest" style="margin-top:var(--gap)"><div class="card-h bare"><h3>خلاصه روزانه زمان‌بندی‌شده</h3>${yes(dg.config.enabled)}<span class="tb-spacer"></span><span class="small dim">آخرین ارسال: ${dg.last ? ago(dg.last.t) + " · " + fa(dg.last.sent) + " کانال" : "—"}</span></div>
+    <div class="dg-grid"><div class="form"><label class="chk"><input type="checkbox" id="dgOn" ${dg.config.enabled ? "checked" : ""}> ارسال خودکار روزانه به کانال‌هایی که «ارسال بریف» دارند</label>
+     <label>ساعت ارسال (${esc(dg.tz)})<select id="dgH">${Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${h === dg.config.hour ? "selected" : ""}>${fa(h)}:۰۰</option>`).join("")}</select></label>
+     <label>بازه پوشش<select id="dgW">${[[12, "۱۲ ساعت"], [24, "۲۴ ساعت"], [48, "۴۸ ساعت"], [168, "۷ روز"]].map(([v, l]) => `<option value="${v}" ${v === dg.config.hours ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+     <label>تعداد داستان برتر<select id="dgT">${[5, 8, 10, 15].map((v) => `<option ${v === dg.config.top ? "selected" : ""}>${v}</option>`).join("")}</select></label>
+     <div class="toolbar" style="margin:4px 0 0"><button class="btn primary sm" id="dgSave">ذخیره زمان‌بندی</button><button class="btn sm" id="dgSend">ارسال اکنون</button></div></div>
+     <div><div class="small muted" style="margin-bottom:4px">پیش‌نمایش پیام</div><pre class="dg-prev">${esc(dg.preview)}</pre></div></div></div>
    <div class="card flush" style="margin-top:var(--gap)"><div class="card-h"><h3>تاریخچه ارسال</h3></div><table class="t"><thead><tr><th>زمان</th><th>کانال</th><th>عنوان</th><th>نتیجه</th></tr></thead><tbody>
    ${dels.map((d) => `<tr><td class="small"><time>${dt(d.ts)}</time></td><td class="small">${esc(d.channel_name || "#" + d.channel_id)}</td><td>${esc(d.title || d.ref)}</td><td>${d.ok ? '<span class="pill ok">ارسال شد</span>' : `<span class="pill err" title="${esc(d.error || "")}">خطا</span> <span class="small dim">${esc((d.error || "").slice(0, 70))}</span>`}</td></tr>`).join("") || '<tr><td colspan="4" class="empty small">ارسالی ثبت نشده</td></tr>'}</tbody></table></div>`;
   side.innerHTML = `<h2>اعلان‌ها</h2><p class="small muted" style="line-height:1.9">پس از هر اجرا، سیگنال‌های جدید یا تأییدشده (۲۴ ساعت اخیر) طبق قواعد هر کانال ارسال می‌شوند؛ هر مورد فقط یک‌بار به هر کانال می‌رود. بریف‌ها پس از تأیید در دروازه انسانی ارسال می‌شوند.</p><div class="h-sec">محرمانگی</div><div class="small muted">توکن‌ها، رمزها و آدرس‌های وب‌هوک فقط‌نوشتنی‌اند و در API با «•••» پوشانده می‌شوند.</div>`;
@@ -155,6 +162,8 @@ async function channels(box, side) {
       f._validate = async (x) => { if (c) x.type = c.type; try { await post(c ? `/api/notify/channels/${c.id}` : "/api/notify/channels", packChannel(x)); } catch (e) { return e.message; } };
     } });
   $("#cAdd").onclick = async () => { if (await open(null)) { toast("کانال ایجاد شد", "success"); reload(); } };
+  $("#dgSave").onclick = async () => { try { await post("/api/notify/digest", { enabled: $("#dgOn").checked, hour: +$("#dgH").value, hours: +$("#dgW").value, top: +$("#dgT").value }); toast("زمان‌بندی خلاصه روزانه ذخیره شد", "success"); reload(); } catch (e) { toast(e.message, "error"); } };
+  $("#dgSend").onclick = async (e) => { e.target.disabled = true; const r = await post("/api/notify/digest/send"); toast(r.sent ? `خلاصه به ${fa(r.sent)} کانال ارسال شد` : "کانال فعالی با «ارسال بریف» وجود ندارد یا ارسال ناموفق بود", r.sent ? "success" : "warn"); reload(); };
   box.onclick = async (e) => {
     const b = e.target.closest("button"); if (!b) return;
     if (b.dataset.test) { b.disabled = true; b.textContent = "در حال ارسال…"; const r = await post(`/api/notify/channels/${b.dataset.test}/test`).catch((er) => ({ ok: false, error: er.message })); toast(r.ok ? "پیام آزمایشی ارسال شد ✓" : "ارسال ناموفق: " + (r.error || ""), r.ok ? "success" : "error"); reload(); }

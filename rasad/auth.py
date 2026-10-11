@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS users(
   pw_hash TEXT NOT NULL, active INTEGER DEFAULT 1, created REAL, last_login REAL);
 CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id INTEGER, created REAL, expires REAL, ua TEXT, ip TEXT);
 CREATE TABLE IF NOT EXISTS login_attempts(key TEXT, ts REAL);
+CREATE TABLE IF NOT EXISTS api_tokens(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, name TEXT, token_hash TEXT UNIQUE, prefix TEXT,
+  created REAL, last_used REAL, expires REAL);
 """
 
 
@@ -116,6 +118,7 @@ def update_user(uid, body):
             c.execute(f"UPDATE users SET {','.join(sets)} WHERE id=?", (*args, uid))
             if body.get("password") or body.get("active") is False:
                 c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+        c.execute("DELETE FROM api_tokens WHERE user_id=?", (uid,))
     return public(db.q1("SELECT * FROM users WHERE id=?", (uid,)))
 
 
@@ -127,6 +130,7 @@ def delete_user(uid):
         raise ValueError("آخرین مدیر قابل حذف نیست")
     with db.tx() as c:
         c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+        c.execute("DELETE FROM api_tokens WHERE user_id=?", (uid,))
         c.execute("DELETE FROM users WHERE id=?", (uid,))
 
 
@@ -171,9 +175,38 @@ def _th(tok):
     return hashlib.sha256(tok.encode()).hexdigest()
 
 
+API_PREFIX = "rsd_"
+
+
+def create_api_token(uid, name, days=None):
+    import secrets
+    tok = API_PREFIX + secrets.token_urlsafe(30)
+    exp = time.time() + int(days) * 86400 if days else None
+    with db.tx() as c:
+        tid = c.execute("INSERT INTO api_tokens(user_id,name,token_hash,prefix,created,expires) VALUES(?,?,?,?,?,?)",
+                        (uid, (name or "token")[:60], _th(tok), tok[:10], time.time(), exp)).lastrowid
+    return tok, tid
+
+
+def list_api_tokens(uid):
+    return db.q("SELECT id,name,prefix,created,last_used,expires FROM api_tokens WHERE user_id=? ORDER BY id DESC", (uid,))
+
+
+def revoke_api_token(uid, tid):
+    with db.tx() as c:
+        return c.execute("DELETE FROM api_tokens WHERE id=? AND user_id=?", (tid, uid)).rowcount
+
+
 def user_from_token(tok):
     if not tok:
         return None
+    if tok.startswith(API_PREFIX):
+        r = db.q1("""SELECT u.*, t.id tid, t.last_used FROM api_tokens t JOIN users u ON u.id=t.user_id
+                     WHERE t.token_hash=? AND (t.expires IS NULL OR t.expires>?) AND u.active=1""", (_th(tok), time.time()))
+        if r and time.time() - (r["last_used"] or 0) > 60:
+            with db.tx() as c:
+                c.execute("UPDATE api_tokens SET last_used=? WHERE id=?", (time.time(), r["tid"]))
+        return public(r)
     r = db.q1("""SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires>? AND u.active=1""",
               (_th(tok), time.time()))
     return public(r)
@@ -186,7 +219,7 @@ OPEN_USER = {"id": 0, "username": "local", "name": "کاربر محلی", "role"
 PUBLIC = ("/api/auth/", "/healthz", "/metrics")
 ADMIN_PREFIX = ("/api/control", "/api/ai/config", "/api/ai/test", "/api/users", "/api/sources", "/api/rerun", "/api/notify",
                 "/api/system", "/api/audit")
-VIEWER_POST_OK = ("/api/ask",)
+VIEWER_POST_OK = ("/api/ask", "/api/me/")
 
 
 def required_role(method: str, path: str):

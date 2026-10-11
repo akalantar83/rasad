@@ -115,14 +115,16 @@ class PatternAnomaly(Agent):
         prior_windows = max(1.0, (now - 6 * 3600 - base_start * 3600) / (6 * 3600))
         for e, n in (recent.items() if warm else []):
             rate_prior = prior[e] / prior_windows
-            name = ENTITY.get(e, {}).get("name_fa", e)
+            name = ENTITY.get(e, {}).get("name_fa") or (db.q1("SELECT name_fa FROM entities WHERE id=?", (e,)) or {}).get("name_fa") or e
+            ent_stories = [r["story_id"] for r in db.q("""SELECT a.story_id, COUNT(*) n FROM mentions mm JOIN articles a ON a.id=mm.article_id
+                           WHERE mm.entity_id=? AND a.published_at>? AND a.story_id IS NOT NULL GROUP BY a.story_id ORDER BY n DESC LIMIT 8""", (e, now - 6 * 3600))]
             if prior[e] == 0 and n >= 3:
                 sigs.append({"type": "new_actor", "key": e, "label": f"ظهور ناگهانی «{name}»", "score": float(n), "baseline": 0.0,
-                             "observed": float(n), "window": f"6h@{H // 6}", "severity": "warning"})
+                             "observed": float(n), "window": f"6h@{H // 6}", "severity": "warning", "story_ids": ent_stories})
             elif n >= 6 and n >= 3 * max(1.0, rate_prior):
                 sigs.append({"type": "entity_spike", "key": e, "label": f"افزایش شدید اشاره به «{name}»", "score": round(n / max(1.0, rate_prior), 2),
                              "baseline": round(rate_prior, 2), "observed": float(n), "window": f"6h@{H // 6}",
-                             "severity": "critical" if n >= 6 * max(1.0, rate_prior) else "warning"})
+                             "severity": "critical" if n >= 6 * max(1.0, rate_prior) else "warning", "story_ids": ent_stories})
         ctx.progress(0.7)
         # 3) fast-spreading stories: >=4 independent sources within 3h of first report
         for s in db.q("SELECT id,title,title_fa,first_seen,source_count,urgency,category FROM stories WHERE last_update>? AND source_count>=4", (now - 12 * 3600,)):

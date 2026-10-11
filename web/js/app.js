@@ -3,6 +3,8 @@ import * as V from "./views.js";
 import { renderPipeline } from "./pipeline.js";
 import { renderAsk, renderSettings } from "./ai.js";
 import { renderGraph } from "./graph.js";
+import { renderAlerts, initBell } from "./alerts.js";
+import { renderExplore } from "./explore.js";
 import { renderAdmin, renderWatch } from "./admin.js";
 import { authStatus, showLogin, renderUserMenu, applyRole } from "./auth.js";
 import { can } from "./core.js";
@@ -17,6 +19,8 @@ const ROUTES = [
   { id: "sources", fa: "مقایسه پوشش منابع", icon: I('<path d="M4 5h16v4H4zM4 11h10v4H4zM4 17h13v3H4z"/>'), render: V.renderSources },
   { id: "pipeline", fa: "خط لوله عامل‌ها", icon: I('<rect x="2.5" y="9" width="5" height="6" rx="1.5"/><rect x="9.5" y="4" width="5" height="6" rx="1.5"/><rect x="9.5" y="14" width="5" height="6" rx="1.5"/><rect x="16.5" y="9" width="5" height="6" rx="1.5"/><path d="M7.5 12h2M14.5 7l2 3M14.5 17l2-3"/>'), render: renderPipeline },
   { id: "ask", fa: "دستیار تحلیلی (پرسش از رصد)", icon: I('<path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8z"/><path d="M18.5 15l.8 1.9 1.9.8-1.9.8-.8 1.9-.8-1.9-1.9-.8 1.9-.8z"/>'), render: renderAsk, noDrawer: true },
+  { id: "alerts", fa: "مرکز هشدارها", icon: I('<path d="M12 3.5 2.8 19.5h18.4z"/><path d="M12 10v4.2M12 17.2v.1"/>'), render: renderAlerts, noDrawer: true },
+  { id: "explore", fa: "کاوش و جست‌وجوی پیشرفته", icon: I('<circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-4.8-4.8M8 10.5h5M10.5 8v5"/>'), render: renderExplore, noDrawer: true },
   { id: "watch", fa: "فهرست‌های پایش", icon: I('<path d="M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/>'), render: renderWatch, noDrawer: true },
   { id: "briefs", fa: "بریف و گزارش", icon: I('<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 12h7M9 16h7"/>'), render: V.renderBriefs },
 ];
@@ -110,6 +114,7 @@ const ACTIONS = [
   { g: "فرمان", t: "پس‌گرفتن کنترل (Take over → دستی)", run: () => post("/api/control", { action: "takeover" }) },
   { g: "فرمان", t: "حالت نمایش روایی", run: () => startPresentation() },
   { g: "فرمان", t: "تغییر تم تیره/روشن", run: () => $("#themeBtn").click() },
+  { g: "فرمان", t: "جست‌وجوی پیشرفته در خبرها", run: () => (location.hash = "#/explore/" + encodeURIComponent($("#palIn").value || "")) },
   ...ROUTES.filter((r) => !r.hidden).map((r) => ({ g: "رفتن به", t: r.fa, run: () => (location.hash = "#/" + r.id) })),
 ];
 function openPal() { pal.open = true; $("#palOv").classList.add("open"); $("#palIn").value = ""; $("#palIn").focus(); palSearch(""); }
@@ -125,6 +130,7 @@ async function palSearch(q) {
     pal.items = [...acts,
       ...r.entities.map((e) => ({ g: "موجودیت", t: `${e.name_fa} · ${e.name_en}`, run: () => (location.hash = "#/graph/" + e.id) })),
       ...r.stories.map((s) => ({ g: "داستان", t: s.title_fa || s.title, run: () => (location.hash = "#/stories/" + s.id) })),
+      { g: "کاوش", t: `جست‌وجوی تمام‌متن «${q}» در کاوش پیشرفته`, run: () => (location.hash = "#/explore/" + encodeURIComponent(q)) },
       ...r.articles.slice(0, 10).map((a) => ({ g: "خبر", t: a.title, run: () => (location.hash = "#/stories/" + a.story_id) }))];
     pal.idx = 0; drawPal();
   }, 180);
@@ -190,7 +196,7 @@ on("auth_required", () => { if (authShown) return; authShown = true; showLogin(f
   try { st = await authStatus(); } catch (e) { $("#view").innerHTML = `<div class="empty">اتصال به سرور برقرار نشد: ${esc(e.message)}</div>`; return; }
   if (st.setup_required) { authShown = true; return showLogin(true); }
   if (st.auth_enabled && !st.user) { authShown = true; return showLogin(false); }
-  applyRole(); renderUserMenu(); buildRail();
+  applyRole(); renderUserMenu(); buildRail(); initBell();
   const meta = await api("/api/meta");
   store.meta = meta; store.topics = meta.topics; store.state = meta.state;
   renderState(meta.state);

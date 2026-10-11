@@ -1,5 +1,5 @@
 // Authentication UI: first-run setup, sign-in screen, user menu, password change, role gating.
-import { $, esc, api, post, store, toast, modal, ROLE_RANK } from "./core.js";
+import { $, esc, fa, ago, dt, api, post, store, toast, modal, ROLE_RANK } from "./core.js";
 
 export async function authStatus() {
   const s = await api("/api/auth/status");
@@ -53,7 +53,7 @@ export function renderUserMenu() {
   const ini = (u.name || u.username).trim().slice(0, 1).toUpperCase();
   host.innerHTML = `<button class="user-btn" id="userBtn"><span class="avatar r-${u.role}">${esc(ini)}</span><span class="un"><b>${esc(u.name || u.username)}</b><small>${esc(u.role_fa || u.role)}</small></span></button>
    <div class="menu" id="userDrop"><div class="menu-h"><b>${esc(u.name || u.username)}</b><div class="small dim" dir="ltr">@${esc(u.username)}</div></div>
-   <button data-a="pw">تغییر رمز عبور</button>${u.role === "admin" ? '<button data-a="admin">مدیریت سامانه</button>' : ""}<button data-a="watch">فهرست‌های پایش</button><hr><button data-a="out" class="danger">خروج</button></div>`;
+   <button data-a="pw">تغییر رمز عبور</button><button data-a="tok">توکن‌های API</button>${u.role === "admin" ? '<button data-a="admin">مدیریت سامانه</button>' : ""}<button data-a="watch">فهرست‌های پایش</button><hr><button data-a="out" class="danger">خروج</button></div>`;
   const drop = $("#userDrop");
   $("#userBtn").onclick = (e) => { e.stopPropagation(); drop.classList.toggle("open"); };
   document.addEventListener("click", () => drop.classList.remove("open"));
@@ -64,6 +64,7 @@ export function renderUserMenu() {
     if (a === "watch") location.hash = "#/watch";
     if (a === "out") { await post("/api/auth/logout").catch(() => {}); location.reload(); }
     if (a === "pw") changePassword();
+    if (a === "tok") apiTokens();
   };
 }
 
@@ -72,4 +73,25 @@ async function changePassword() {
     body: `<div class="form"><label>رمز فعلی<input name="old" type="password" dir="ltr" autocomplete="current-password"></label><label>رمز جدید<input name="new" type="password" dir="ltr" autocomplete="new-password"></label><label>تکرار رمز جدید<input name="new2" type="password" dir="ltr" autocomplete="new-password"></label></div><p class="small dim">پس از تغییر، سایر نشست‌های شما بسته می‌شوند.</p>`,
     onOpen: (f) => (f._validate = async (x) => { if (x.new !== x.new2) return "تکرار رمز یکسان نیست"; if ((x.new || "").length < 8) return "رمز جدید باید حداقل ۸ نویسه باشد"; try { await post("/api/auth/password", { old: x.old, new: x.new }); } catch (e) { return e.message; } }) });
   if (v) toast("رمز عبور تغییر کرد", "success");
+}
+
+async function apiTokens() {
+  const list = await api("/api/me/tokens");
+  const rows = (l) => l.map((t) => `<tr><td><b>${esc(t.name)}</b></td><td class="ltr-r small num">${esc(t.prefix)}…</td><td class="small">${dt(t.created)}</td><td class="small">${t.last_used ? ago(t.last_used) : "—"}</td><td class="small">${t.expires ? dt(t.expires) : "بدون انقضا"}</td><td><button type="button" class="btn ghost sm danger" data-rv="${t.id}">ابطال</button></td></tr>`).join("") || '<tr><td colspan="6" class="empty small">توکنی ساخته نشده است</td></tr>';
+  await modal({ title: "توکن‌های API شخصی", submit: null, wide: true,
+    body: `<p class="small muted" style="margin-top:0;line-height:1.9">برای اسکریپت‌ها و یکپارچه‌سازی (Power BI، n8n، cron) از هدر <code dir="ltr">Authorization: Bearer rsd_…</code> استفاده کنید. توکن با سطح دسترسی نقش شما (${esc(store.user?.role_fa || "")}) کار می‌کند و فقط یک‌بار نمایش داده می‌شود.</p>
+      <div class="toolbar"><input type="text" id="tkN" placeholder="نام توکن، مثلاً: گزارش‌گیری روزانه" style="flex:1"><select id="tkD"><option value="30">۳۰ روز</option><option value="90" selected>۹۰ روز</option><option value="365">یک سال</option><option value="">بدون انقضا</option></select><button type="button" class="btn primary sm" id="tkC">ساخت توکن</button></div>
+      <div id="tkNew"></div><table class="t"><thead><tr><th>نام</th><th>پیشوند</th><th>ایجاد</th><th>آخرین استفاده</th><th>انقضا</th><th></th></tr></thead><tbody id="tkRows">${rows(list)}</tbody></table>`,
+    onOpen: (f) => {
+      const refresh = async () => ($("#tkRows").innerHTML = rows(await api("/api/me/tokens")));
+      $("#tkC").onclick = async () => {
+        try {
+          const d = $("#tkD").value, r = await post("/api/me/tokens", { name: $("#tkN").value || "token", days: d ? +d : null });
+          $("#tkNew").innerHTML = `<div class="tok-new"><div class="small"><b>توکن جدید — همین حالا کپی کنید؛ دوباره نمایش داده نمی‌شود:</b></div><div class="tok-box"><code dir="ltr" id="tkV">${esc(r.token)}</code><button type="button" class="btn sm" id="tkCp">کپی</button></div></div>`;
+          $("#tkCp").onclick = () => { navigator.clipboard?.writeText(r.token); toast("کپی شد", "success"); };
+          refresh();
+        } catch (e) { toast(e.message, "error"); }
+      };
+      f.addEventListener("click", async (e) => { const id = e.target.dataset.rv; if (!id) return; await api("/api/me/tokens/" + id, { method: "DELETE" }); toast("توکن ابطال شد", "success"); refresh(); });
+    } });
 }

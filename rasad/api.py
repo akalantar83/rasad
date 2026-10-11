@@ -7,14 +7,14 @@ from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import ai, auth, db, llm, notify, ops, watch
+from . import ai, auth, db, explore, llm, notify, ops, triage, watch
 from . import supervisor as sup_mod
 from .config import settings
 from .supervisor import bus
 from .taxonomy import ENTITY, TOPICS
 from .text import normalize
 
-app = FastAPI(title="Rasad · رصد", version="0.3.0")
+app = FastAPI(title="Rasad · رصد", version="0.4.0")
 
 
 @app.on_event("startup")
@@ -24,6 +24,17 @@ async def _startup():
     sync_sources()
     s = sup_mod.get()
     asyncio.create_task(s.scheduler())
+    asyncio.create_task(_digest_ticker())
+
+
+async def _digest_ticker():
+    """Checks every 5 minutes whether the daily shift digest is due (works in every execution mode)."""
+    while True:
+        try:
+            await asyncio.to_thread(notify.dispatch_digest)
+        except Exception as e:  # noqa: BLE001
+            print("digest:", e)
+        await asyncio.sleep(300)
 
 
 def _auth(token):
@@ -913,6 +924,121 @@ async def system_purge(body: dict = Body(default={})):
     r = await asyncio.to_thread(ops.purge, int(body.get("days") or 0) or None)
     db.audit("user", "system:purge", "", r)
     bus.publish({"type": "data_changed"})
+    return r
+
+
+# ---------------- v0.4: alert triage ----------------
+@app.get("/api/alerts")
+def alerts_list(hours: int = 168, status: str = None, severity: str = None, type: str = None, assignee: str = None, q: str = None):
+    return triage.listing(hours, status, severity, type, assignee, q)
+
+
+@app.get("/api/alerts/{gid}")
+def alerts_detail(gid: int):
+    try:
+        return triage.detail(gid)
+    except KeyError:
+        raise HTTPException(404)
+
+
+@app.post("/api/alerts/bulk")
+def alerts_bulk(body: dict = Body(...)):
+    if body.get("status") not in triage.STATUSES:
+        raise HTTPException(400, "وضعیت نامعتبر")
+    n = triage.bulk(body.get("ids") or [], body["status"])
+    bus.publish({"type": "alerts_changed"})
+    return {"updated": n}
+
+
+@app.post("/api/alerts/{gid}")
+def alerts_update(gid: int, body: dict = Body(...)):
+    try:
+        r = triage.update(gid, body)
+    except KeyError:
+        raise HTTPException(404)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    bus.publish({"type": "alerts_changed"})
+    return r
+
+
+@app.get("/api/people")
+def people():
+    """Minimal directory (for assignment pickers) — available to every signed-in role."""
+    return db.q("SELECT username, name, role FROM users WHERE active=1 ORDER BY name")
+
+
+# ---------------- v0.4: personal API tokens ----------------
+def _me():
+    u = auth.current_user.get()
+    if not u or not u.get("id"):
+        raise HTTPException(400, "توکن API فقط برای حساب‌های کاربری واقعی قابل ساخت است")
+    return u
+
+
+@app.get("/api/me/tokens")
+def my_tokens():
+    return auth.list_api_tokens(_me()["id"])
+
+
+@app.post("/api/me/tokens")
+def my_token_create(body: dict = Body(...)):
+    u = _me()
+    days = body.get("days")
+    if days is not None and not 1 <= int(days) <= 3650:
+        raise HTTPException(400, "مدت اعتبار نامعتبر است")
+    tok, tid = auth.create_api_token(u["id"], body.get("name"), days)
+    db.audit(u["username"], "token:create", str(tid), {"name": body.get("name"), "days": days})
+    return {"id": tid, "token": tok}
+
+
+@app.delete("/api/me/tokens/{tid}")
+def my_token_revoke(tid: int):
+    u = _me()
+    if not auth.revoke_api_token(u["id"], tid):
+        raise HTTPException(404)
+    db.audit(u["username"], "token:revoke", str(tid))
+    return {"ok": True}
+
+
+# ---------------- v0.4: explore (advanced search) ----------------
+@app.get("/api/explore")
+def explore_api(request: Request):
+    try:
+        return explore.search(dict(request.query_params))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/explore.csv")
+def explore_csv(request: Request):
+    try:
+        return _csv_resp(explore.csv_export(dict(request.query_params)), "rasad-search.csv")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+# ---------------- v0.4: scheduled digest ----------------
+@app.get("/api/notify/digest")
+def digest_get():
+    text, stats = notify.digest_text(notify.digest_cfg()["hours"], notify.digest_cfg()["top"])
+    return {"config": notify.digest_cfg(), "last": db.kv_get("last_digest"), "preview": text, "stats": stats, "tz": settings.tz}
+
+
+@app.post("/api/notify/digest")
+def digest_set(body: dict = Body(...)):
+    try:
+        cfg = notify.set_digest_cfg(body)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e))
+    db.audit("user", "notify:digest", "", cfg)
+    return cfg
+
+
+@app.post("/api/notify/digest/send")
+async def digest_send():
+    r = await asyncio.to_thread(notify.dispatch_digest, True)
+    db.audit("user", "notify:digest_send", "", {"sent": r["sent"]})
     return r
 
 
